@@ -1630,21 +1630,18 @@ for (i in seq_along(mz_values)) {
   mz_val           <- round(mz_values[i], 4)
   annotation_found <- FALSE
   
-  # Resolve adduct source: prefer mz_matched_ADDUCT, fall back to Predicted_Adduct
-  adduct_source <- NA
-  if ("mz_matched_ADDUCT" %in% rownames(feature_matrix_df_final_annotated_filtered)) {
-    adduct_source <- feature_matrix_df_final_annotated_filtered["mz_matched_ADDUCT", i]
-  }
-  if (is.na(adduct_source) || adduct_source == "" || adduct_source == "NA") {
-    if ("Predicted_Adduct" %in% rownames(feature_matrix_df_final_annotated_filtered))
-      adduct_source <- feature_matrix_df_final_annotated_filtered["Predicted_Adduct", i]
-  }
-  
   # Priority 1: Formula_Matched_NAME
+  #   Adduct: always Predicted_Adduct — mz_matched_ADDUCT belongs to
+  #   a different matching method and must NOT be used here.
   if ("Formula_Matched_NAME" %in% rownames(feature_matrix_df_final_annotated_filtered)) {
+    
+    formula_adduct_source <- NA
+    if ("Predicted_Adduct" %in% rownames(feature_matrix_df_final_annotated_filtered))
+      formula_adduct_source <- feature_matrix_df_final_annotated_filtered["Predicted_Adduct", i]
+    
     parsed <- parse_first_annotation_and_adduct(
       feature_matrix_df_final_annotated_filtered["Formula_Matched_NAME", i],
-      adduct_source
+      formula_adduct_source
     )
     if (!is.na(parsed$name)) {
       final_annotation_names[i] <- paste0(parsed$name, " (", mz_val, ";",
@@ -1654,10 +1651,20 @@ for (i in seq_along(mz_values)) {
   }
   
   # Priority 2: mz_matched_NAME
+  #   Adduct: prefer mz_matched_ADDUCT (its own), fall back to Predicted_Adduct.
   if (!annotation_found && "mz_matched_NAME" %in% rownames(feature_matrix_df_final_annotated_filtered)) {
+    
+    mz_adduct_source <- NA
+    if ("mz_matched_ADDUCT" %in% rownames(feature_matrix_df_final_annotated_filtered))
+      mz_adduct_source <- feature_matrix_df_final_annotated_filtered["mz_matched_ADDUCT", i]
+    if (is.na(mz_adduct_source) || mz_adduct_source == "" || mz_adduct_source == "NA") {
+      if ("Predicted_Adduct" %in% rownames(feature_matrix_df_final_annotated_filtered))
+        mz_adduct_source <- feature_matrix_df_final_annotated_filtered["Predicted_Adduct", i]
+    }
+    
     parsed <- parse_first_annotation_and_adduct(
       feature_matrix_df_final_annotated_filtered["mz_matched_NAME", i],
-      adduct_source
+      mz_adduct_source
     )
     if (!is.na(parsed$name)) {
       final_annotation_names[i] <- paste0(parsed$name, " (", mz_val, ";",
