@@ -50,7 +50,7 @@ The app installs missing packages automatically on first launch. You will need a
 | R | ≥ 4.3 |
 | OS | Windows 10+, macOS 12+, Linux (Ubuntu 20.04+) |
 | RAM | 8 GB (16 GB+ recommended for large datasets) |
-| Input files | `.mzML` or `.mzXML` **PROFILE:** MS1 FI-MS data |
+| Input files | `.mzML` or `.mzXML` **PROFILE** MS1 FI-MS data |
 
 ---
 
@@ -103,12 +103,12 @@ Use the **Browse** buttons next to each field to navigate your filesystem.
 
 | Parameter | Description |
 |---|---|
-| `rt_min` / `rt_max` | Retention time window (seconds) for 1D spectra accumulation of selected range|
+| `rt_min` / `rt_max` | Retention time window (seconds) for 1D spectra accumulation |
 | Export Spectra | Export 1D spectra as `.mzML` files of all steps|
 | Apply smoothing | Enable Savitzky–Golay smoothing before centroiding |
 | Smoothing window (n) | Window size (odd integer, e.g. 7) |
 | Smoothing polynomial (p) | Polynomial degree (e.g. 2) |
-| Intensity threshold | Minimum intensity for centroid calculation |
+| Intensity threshold | Minimum intensity for inclusion of centroid calculation |
 | PPM tolerance | Mass accuracy window for peak picking |
 | PPM tolerance (annotation) | Mass accuracy window for m/z annotation against HMDB |
 
