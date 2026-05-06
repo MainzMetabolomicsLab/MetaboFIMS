@@ -56,11 +56,16 @@ The app installs missing packages automatically on first launch. You will need a
 
 ## Installation
 
-1. **Clone or download** this repository:
+1. **Get the files** — choose one of the following methods:
+   **Option A — Clone via Git:**
    ```bash
    git clone https://github.com/MainzMetabolomicsLab/MetaboFIMS.git
-   cd fims-pipeline
+   cd MetaboFIMS
    ```
+ 
+   **Option B — Manual download:**
+   Go to the [repository page](https://github.com/MainzMetabolomicsLab/MetaboFIMS), click **Code → Download ZIP**, extract the archive, and open the folder. Alternatively, you can download the two `.R` files individually by navigating to each file in the repository and clicking the **Download raw file** button (the download icon in the top-right of the file viewer).
+
 
 2. **Open `app.R`** in RStudio.
 
