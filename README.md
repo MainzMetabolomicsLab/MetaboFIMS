@@ -1,6 +1,6 @@
 # MetaboFIMS — Shiny App
 
-A cross-platform R Shiny application for automated processing of **Flow Injection Mass Spectrometry (FIMS/FIA)** data in positive and negative ion mode. 
+A cross-platform R Shiny application for automated and untargeted processing of **Flow Injection Mass Spectrometry (FIMS/FIA)** data 
 ---
 
 ## Table of Contents
