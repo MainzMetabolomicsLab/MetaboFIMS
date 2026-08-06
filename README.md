@@ -38,7 +38,7 @@ A cross-platform R Shiny application for automated and untargeted processing of 
 The app installs missing packages automatically on first launch. You will need an internet connection for the initial setup. The following are required:
 
 **Bioconductor:**
-`xcms`, `MSnbase`, `CAMERA`, `Rdisop`, `BiocParallel`, `Spectra`, `S4Vectors`, `mzR`
+`MSnbase`, `CAMERA`, `Rdisop`, `BiocParallel`, `Spectra`, `S4Vectors`, `mzR`
 
 **CRAN:**
 `R.utils`, `webchem`, `data.table`, `dplyr`, `tidyverse`, `ggplot2`, `stringdist`, `shiny`, `shinyFiles`, `DT`, `callr`, `yaml`
