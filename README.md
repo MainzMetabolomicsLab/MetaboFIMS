@@ -67,7 +67,7 @@ The app installs missing packages automatically on first launch. You will need a
    Go to the [repository page](https://github.com/MainzMetabolomicsLab/MetaboFIMS), click **Code → Download ZIP**, extract the archive, and open the folder. Alternatively, you can download the two `.R` files individually by navigating to each file in the repository and clicking the **Download raw file** button (the download icon in the top-right of the file viewer).
 
 
-2. **Open `app.R`** in RStudio.
+2. **Open `MetaboFIMS V1.0 SHINY.R`** in RStudio.
 
 3. **Run the app:**
    ```r
@@ -77,7 +77,7 @@ The app installs missing packages automatically on first launch. You will need a
 
 4. Alternatively, launch from the terminal:
    ```bash
-   Rscript -e "shiny::runApp('app.R')"
+   Rscript -e "shiny::runApp('MetaboFIMS V1.0 SHINY.R')"
    ```
 
 ---
