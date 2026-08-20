@@ -104,6 +104,7 @@ Use the **Browse** buttons next to each field to navigate your filesystem.
 | Parameter | Description |
 |---|---|
 | `rt_min` / `rt_max` | Retention time window (seconds) for 1D spectra accumulation |
+| `mz_min_limit` / `mz_max_limit` | Mass range (m/z) limits |
 | Export Spectra | Export 1D spectra as `.mzML` files of all steps|
 | Apply smoothing | Enable Savitzky–Golay smoothing before centroiding |
 | Smoothing window (n) | Window size (odd integer, e.g. 7) |
