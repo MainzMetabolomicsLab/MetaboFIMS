@@ -126,7 +126,7 @@ ui <- fluidPage(
       numericInput("rt_max", "rt_max (s)", value = 25, min = 0, step = 1),
       hr(),
       h4("Mass range (m/z) limits"),
-      numericInput("mz_min_limit", "mz_min_limit", value = 80, min = 0, step = 1),
+      numericInput("mz_min_limit", "mz_min_limit", value = 70, min = 0, step = 1),
       numericInput("mz_max_limit", "mz_max_limit", value = 1000, min = 0, step = 1),
       hr(),
       h4("Export of Spectra"),
