@@ -873,7 +873,7 @@ format_scientific <- function(x) {
                         guide = guide_legend(override.aes = list(shape = 22, size = 5))) +
       geom_hline(yintercept = 0, color = "grey50", linewidth = 1) +
       geom_vline(xintercept = 0, color = "grey50", linewidth = 1) +
-      labs(title = paste0("PCA: Mean Trajectory [", mode, "]"),
+      labs(title = paste0("PCA: Mean Trajectory Across Visits"),
            x = pc1_lab_lmm, y = pc2_lab_lmm) +
       theme_minimal(base_size = 16) +
       theme(panel.grid = element_blank(), axis.line = element_line(color = "black"),
@@ -2802,3 +2802,1103 @@ if (nrow(dual_axis_targets_lmm) == 0) {
   message("✅ [EXTRA] FI-MS-significant raw-intensity (median) dual spaghetti plots saved to: ",
           normalizePath(dual_spaghetti_lmm_dir))
 }
+
+
+
+
+
+
+
+
+
+#Mockplot for biorender
+
+
+
+
+#Mockplot for biorender
+
+# Load required libraries
+if (!requireNamespace("ggplot2", quietly = TRUE)) install.packages("ggplot2")
+if (!requireNamespace("dplyr", quietly = TRUE)) install.packages("dplyr")
+
+library(ggplot2)
+library(dplyr)
+
+# ------------------------------------------------------------------------------
+# 1. GENERATE MOCK DATA
+# ------------------------------------------------------------------------------
+set.seed(42)
+
+n_patients <- 15
+visits <- c("T1", "T2", "T3", "T4")
+
+# Visit-level trend: peak at T2, drop at T3, slight recovery at T4.
+visit_trend <- c(T1 = 0, T2 = 7e5, T3 = 1.5e5, T4 = 3.5e5)
+
+mock_data <- expand.grid(PseudoID = paste0("P", 1:n_patients), Visit = visits) %>%
+  mutate(
+    Visit = factor(Visit, levels = visits, ordered = TRUE),
+    fims_intensity = abs(rnorm(n(), mean = 2e6, sd = 5e5) + visit_trend[as.character(Visit)]),
+    lcms_intensity = fims_intensity * 0.8 + rnorm(n(), mean = 0, sd = 3e5),
+    fims_log2 = log2(fims_intensity),
+    lcms_log2 = log2(lcms_intensity)
+  )
+
+# ------------------------------------------------------------------------------
+# 2. HELPER FUNCTIONS
+# ------------------------------------------------------------------------------
+format_scientific <- function(x) {
+  ifelse(is.na(x), "", ifelse(x == 0, "0", sprintf("%.0E", x)))
+}
+
+rescale_to_range <- function(x, target_min, target_max) {
+  x_min <- min(x, na.rm = TRUE)
+  x_max <- max(x, na.rm = TRUE)
+  if (!is.finite(x_min) || !is.finite(x_max) || x_max == x_min) {
+    return(rep((target_min + target_max) / 2, length(x)))
+  }
+  (x - x_min) / (x_max - x_min) * (target_max - target_min) + target_min
+}
+
+# ------------------------------------------------------------------------------
+# 3. MOCK CORRELATION (SCATTER) PLOT
+# ------------------------------------------------------------------------------
+r_val <- cor(mock_data$fims_log2, mock_data$lcms_log2, method = "pearson")
+r_squared <- round(r_val^2, 3)
+
+# CHANGE: axis.text -> element_blank(). This drops the numeric tick labels
+# on both axes (the log2 intensity values) while keeping the axis titles
+# and tick marks, so no intensity numbers appear on the mock figure.
+p_scatter <- ggplot(mock_data, aes(x = fims_log2, y = lcms_log2)) +
+  geom_point(alpha = 0.6, color = "#1B9E77", size = 1) +
+  geom_smooth(method = "lm", se = TRUE, color = "darkred", linewidth = 0.6) +
+  labs(
+    title = NULL,
+    subtitle = NULL,
+    x = "FI-MS Intensity", y = "LC-MS Intensity"
+  ) +
+  theme_bw(base_size = 6) +
+  theme(
+    axis.text        = element_blank(),
+    axis.title       = element_text(size = 6, face = "bold"),
+    panel.grid.major = element_line(linewidth = 0.25, color = "grey85"),
+    panel.grid.minor = element_blank(),
+    panel.border     = element_rect(color = "grey60", linewidth = 0.6),
+    axis.ticks       = element_line(linewidth = 0.4),
+    plot.margin      = margin(2, 2, 2, 2)
+  )
+
+ggsave("Mock_Scatter_Plot.png", p_scatter, width = 1, height = 1, units = "in", dpi = 600)
+
+
+# ------------------------------------------------------------------------------
+# 4. MOCK DUAL-AXIS SPAGHETTI PLOT
+# ------------------------------------------------------------------------------
+fims_range <- range(mock_data$fims_intensity, na.rm = TRUE)
+lcms_range <- range(mock_data$lcms_intensity, na.rm = TRUE)
+
+plot_data <- mock_data %>%
+  mutate(
+    lcms_scaled = rescale_to_range(lcms_intensity, fims_range[1], fims_range[2])
+  )
+
+fims_mean <- plot_data %>%
+  group_by(Visit) %>%
+  summarise(mean_val = median(fims_intensity, na.rm = TRUE), .groups = "drop")
+
+lcms_mean <- plot_data %>%
+  group_by(Visit) %>%
+  summarise(mean_val = median(lcms_scaled, na.rm = TRUE), .groups = "drop")
+
+inverse_rescale <- function(y) {
+  (y - fims_range[1]) / (fims_range[2] - fims_range[1]) * diff(lcms_range) + lcms_range[1]
+}
+
+# CHANGE: axis.text.y.left and axis.text.y.right -> element_blank(). This
+# removes the scientific-notation intensity numbers on both the left
+# (FI-MS) and right (LC-MS) y-axes. axis.text.x is left untouched since
+# it only shows the visit labels (T1-T4), not intensity values.
+p_dual <- ggplot(plot_data, aes(x = Visit)) +
+  geom_line(aes(y = fims_intensity, group = PseudoID), color = "#1B9E77", alpha = 0.2, linewidth = 0.4) +
+  geom_line(aes(y = lcms_scaled, group = PseudoID), color = "#7570B3", alpha = 0.2, linewidth = 0.4) +
+  
+  geom_line(data = fims_mean, aes(y = mean_val, group = 1), color = "#1B9E77", linewidth = 0.8) +
+  geom_point(data = fims_mean, aes(y = mean_val), color = "#1B9E77", size = 1, shape = 21, fill = "white", stroke = 1.3) +
+  
+  geom_line(data = lcms_mean, aes(y = mean_val, group = 1), color = "#7570B3", linewidth = 0.8, linetype = "dashed") +
+  geom_point(data = lcms_mean, aes(y = mean_val), color = "#7570B3", size = 1, shape = 21, fill = "white", stroke = 1.3) +
+  
+  scale_y_continuous(
+    name     = "FI-MS Intensity",
+    labels   = format_scientific,
+    sec.axis = sec_axis(trans = ~ inverse_rescale(.), name = "LC-MS Intensity", labels = format_scientific),
+    n.breaks = 4
+  ) +
+  labs(title = NULL, x = "Visit") +
+  
+  theme_bw(base_size = 6) +
+  theme(
+    axis.title.x       = element_text(size = 6, face = "bold", margin = margin(t = 2)),
+    axis.title.y.left  = element_text(color = "#1B9E77", face = "bold", size = 6, margin = margin(r = 2)),
+    axis.text.y.left   = element_blank(),
+    axis.title.y.right = element_text(color = "#7570B3", face = "bold", size = 6, margin = margin(l = 2)),
+    axis.text.y.right  = element_blank(),
+    axis.text.x        = element_text(size = 6, color = "grey20"),
+    axis.ticks         = element_line(linewidth = 0.25),
+    panel.grid.major   = element_line(linewidth = 0.2, color = "grey88"),
+    panel.grid.minor   = element_blank(),
+    panel.border       = element_rect(color = "grey60", linewidth = 0.4),
+    plot.margin        = margin(2, 3, 3, 3)
+  )
+
+ggsave("Mock_DualSpaghetti_Plot.png", p_dual, width = 1, height = 1, units = "in", dpi = 600)
+
+message("Mock plots saved successfully in your working directory.")
+
+
+
+
+
+
+###
+### MetaboFIMS paper revision Elastic Net analysis — MOCK EXAMPLE (2 traits)
+###
+###
+### MetaboFIMS paper revision Elastic Net analysis — MOCK EXAMPLE (2 traits)
+###
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(grid)
+
+r2_cutoff <- 0.2
+
+# ------------------------------------------------------------------------------
+# MOCK DATA — just the two requested traits, R^2 values set directly instead
+# of read from Elastic_Net.csv
+# ------------------------------------------------------------------------------
+df_filtered <- tibble::tibble(
+  Clinical_Trait = c("Triglycerides", "Glucose"),
+  LC.MS          = c(0.15, 0.97),
+  FI.MS          = c(0.57, 0.94)
+) %>%
+  mutate(
+    Max_R2 = pmax(LC.MS, FI.MS, na.rm = TRUE)
+  ) %>%
+  arrange(Max_R2) %>%
+  mutate(
+    Clinical_Trait = factor(Clinical_Trait, levels = Clinical_Trait)
+  )
+
+df_long <- df_filtered %>%
+  pivot_longer(
+    cols = c("LC.MS", "FI.MS"),
+    names_to = "Method",
+    values_to = "R2"
+  )
+
+# ------------------------------------------------------------------------------
+# PLOT — same style as the real ElasticNet_R2_Barplot, minus the value labels
+# ------------------------------------------------------------------------------
+p_mock <- ggplot(
+  df_long,
+  aes(x = R2, y = Clinical_Trait, fill = Method)
+) +
+  
+  geom_vline(
+    xintercept = r2_cutoff,
+    linetype = "dashed",
+    color = "grey50",
+    linewidth = 0.5
+  ) +
+  
+  geom_col(
+    position = position_dodge(width = 0.85),
+    width = 0.55,
+    colour = "black",
+    linewidth = 0.3
+  ) +
+  
+  # geom_text() layer intentionally omitted — no R^2 value labels on the bars
+  
+  scale_fill_manual(
+    values = c(
+      "LC.MS" = "#7570B3",
+      "FI.MS" = "#1B9E77"
+    ),
+    labels = c(
+      "LC.MS" = "LC-MS",
+      "FI.MS" = "FI-MS"
+    )
+  ) +
+  
+  scale_x_continuous(
+    limits = c(0, 1),
+    breaks = seq(0, 1, 0.2),
+    labels = sprintf("%.1f", seq(0, 1, 0.2)),
+    # smaller right-side expansion than the original — that 0.12 was there to
+    # leave room for the geom_text() labels sitting just past each bar's end;
+    # with no labels, a small 0.05 buffer is enough
+    expand = expansion(mult = c(0, 0.05))
+  ) +
+  labs(
+    # CHANGE: split onto two lines with plotmath's atop() instead of shifting
+    # hjust — "10-Fold Cross-Validated" on top, "R^2" (still superscripted)
+    # below, so each line is short enough to fit the 1.25in width at size 6.
+    x = expression(atop("10-Fold Cross-Validated", R^2)),
+    y = NULL,
+    fill = NULL
+  ) +
+  
+  theme_bw(base_size = 6) +
+  theme(
+    
+    plot.title         = element_blank(),
+    plot.subtitle      = element_blank(),
+    axis.title.y       = element_text(size = 4, color = "black"),
+    # CHANGE: x-axis title bumped from size 4 to 6 as requested, kept
+    # centered (hjust = 0.5, the default) since the label now wraps onto
+    # two lines via atop() in labs() above, so it no longer needs a left
+    # shift to avoid clipping on the right edge of this narrow plot.
+    axis.title.x       = element_text(size = 6, color = "black"),
+    
+    axis.text.x        = element_text(size = 6, color = "black"), 
+    axis.text.y        = element_text(size = 6, color = "black"),
+    legend.title        = element_text(size = 4, color = "black"),
+    legend.text         = element_text(size = 6, color = "black"),
+    legend.key.size    = unit(0.3, "lines"),
+    legend.spacing.y   = unit(0.1, "lines"), 
+    legend.margin      = ggplot2::margin(0, 0, 0, 0),
+    # CHANGE: legend.box.spacing added and set near-zero. This is the gap
+    # between the legend box and the panel below it when legend.position =
+    # "top" — it's a separate setting from legend.margin (which only pads
+    # the legend's own content) and defaults to ~6pt at this base_size, which
+    # was the visible space between the legend row and the plot.
+    legend.box.spacing = unit(1, "pt"),
+    plot.margin        = ggplot2::margin(2, 2, 2, 2, unit = "pt"),
+    
+    
+    panel.border       = element_rect(color = "black", fill = NA, linewidth = 0.5),
+    axis.line          = element_blank(),
+    axis.ticks         = element_line(linewidth = 0.4, color = "black"),
+    panel.grid.major.x = element_line(colour = "grey85", linewidth = 0.4), 
+    panel.grid.minor   = element_blank(),
+    panel.grid.major.y = element_blank(),
+    legend.position    = "top",
+    legend.justification = "center",
+    legend.key         = element_blank()
+  )
+
+print(p_mock)
+
+# NOTE on sizing: the original `max(3, nrow(df_filtered) * 0.20)` floor was
+# calibrated for a plot with many more traits — at nrow = 2 it would still
+# force a 3in-tall plot with a lot of empty space above/below the two bar
+# pairs. Scaled down here to fit just two traits; bump this back up (or
+# reuse the original formula) once you're plotting the full trait list again.
+plot_height <- 0.75
+ggsave(
+  filename = "ElasticNet_R2_Barplot_MOCK.png",
+  plot = p_mock,
+  width = 1.25,
+  height = plot_height,
+  units = "in",
+  dpi = 600
+)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+#Mockplot for biorender
+
+
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(tibble)
+library(grid)
+
+
+
+PANEL_WIDTH  <- 1.00   
+PANEL_HEIGHT <- 0.75   
+
+DPI <- 600
+
+
+
+# 2. HELPER FUNCTION:
+
+save_fixed_panel <- function(
+    plot,
+    filename,
+    panel_width  = PANEL_WIDTH,
+    panel_height = PANEL_HEIGHT,
+    dpi = DPI
+) {
+  
+  gt <- ggplotGrob(plot)
+
+  panel_rows <- unique(
+    gt$layout[grepl("^panel", gt$layout$name), "t"]
+  )
+  
+  panel_cols <- unique(
+    gt$layout[grepl("^panel", gt$layout$name), "l"]
+  )
+  
+  if (length(panel_rows) == 0 || length(panel_cols) == 0) {
+    stop("Could not identify ggplot panel.")
+  }
+  
+
+  # FORCE PANEL WIDTH
+
+  
+
+  if (length(panel_cols) == 1) {
+    
+    gt$widths[panel_cols] <- unit(
+      panel_width,
+      "in"
+    )
+    
+  } else {
+    
+    gt$widths[panel_cols] <- unit(
+      panel_width / length(panel_cols),
+      "in"
+    )
+  }
+  
+  
+
+  # FORCE PANEL HEIGHT
+
+  
+  if (length(panel_rows) == 1) {
+    
+    gt$heights[panel_rows] <- unit(
+      panel_height,
+      "in"
+    )
+    
+  } else {
+    
+    gt$heights[panel_rows] <- unit(
+      panel_height / length(panel_rows),
+      "in"
+    )
+  }
+  
+
+  temp_file <- tempfile(fileext = ".pdf")
+  
+  pdf(
+    file = temp_file,
+    width = 10,
+    height = 10
+  )
+  
+  grid.newpage()
+  grid.draw(gt)
+  
+  grid.force()
+  
+  total_width <- convertWidth(
+    sum(gt$widths),
+    unitTo = "in",
+    valueOnly = TRUE
+  )
+  
+  total_height <- convertHeight(
+    sum(gt$heights),
+    unitTo = "in",
+    valueOnly = TRUE
+  )
+  
+  dev.off()
+  
+  unlink(temp_file)
+  
+  
+
+  # Safety check
+
+  
+  if (!is.finite(total_width) || total_width <= 0) {
+    stop("Could not determine final plot width.")
+  }
+  
+  if (!is.finite(total_height) || total_height <= 0) {
+    stop("Could not determine final plot height.")
+  }
+  
+  
+
+  png(
+    filename = filename,
+    width = total_width,
+    height = total_height,
+    units = "in",
+    res = dpi,
+    type = "cairo"
+  )
+  
+  grid.newpage()
+  grid.draw(gt)
+  
+  dev.off()
+  
+  
+
+  # Report dimensions
+
+  
+  message(
+    "\nSaved: ", filename,
+    "\n  Actual panel: ",
+    sprintf("%.3f × %.3f in", panel_width, panel_height),
+    "\n  Full canvas:  ",
+    sprintf("%.3f × %.3f in", total_width, total_height),
+    "\n  Resolution:   ", dpi, " dpi\n"
+  )
+  
+  invisible(
+    list(
+      panel_width = panel_width,
+      panel_height = panel_height,
+      canvas_width = total_width,
+      canvas_height = total_height
+    )
+  )
+}
+
+
+
+# 3. GENERATE MOCK DATA
+
+
+set.seed(42)
+
+n_patients <- 15
+visits <- c("T1", "T2", "T3", "T4")
+
+visit_trend <- c(
+  T1 = 0,
+  T2 = 7e5,
+  T3 = 1.5e5,
+  T4 = 3.5e5
+)
+
+mock_data <- expand.grid(
+  PseudoID = paste0("P", 1:n_patients),
+  Visit = visits
+) %>%
+  mutate(
+    Visit = factor(
+      Visit,
+      levels = visits,
+      ordered = TRUE
+    ),
+    
+    fims_intensity =
+      abs(
+        rnorm(
+          n(),
+          mean = 2e6,
+          sd = 5e5
+        ) +
+          visit_trend[as.character(Visit)]
+      ),
+    
+    lcms_intensity =
+      fims_intensity * 0.8 +
+      rnorm(
+        n(),
+        mean = 0,
+        sd = 3e5
+      ),
+    
+    fims_log2 = log2(fims_intensity),
+    
+    lcms_log2 = log2(lcms_intensity)
+  )
+
+
+
+# 4. HELPER FUNCTIONS
+
+format_scientific <- function(x) {
+  
+  ifelse(
+    is.na(x),
+    "",
+    ifelse(
+      x == 0,
+      "0",
+      sprintf("%.0E", x)
+    )
+  )
+}
+
+
+rescale_to_range <- function(
+    x,
+    target_min,
+    target_max
+) {
+  
+  x_min <- min(x, na.rm = TRUE)
+  x_max <- max(x, na.rm = TRUE)
+  
+  if (
+    !is.finite(x_min) ||
+    !is.finite(x_max) ||
+    x_max == x_min
+  ) {
+    
+    return(
+      rep(
+        (target_min + target_max) / 2,
+        length(x)
+      )
+    )
+  }
+  
+  (
+    (x - x_min) /
+      (x_max - x_min)
+  ) *
+    (target_max - target_min) +
+    target_min
+}
+
+
+# 5. MOCK CORRELATION / SCATTER PLOT
+
+r_val <- cor(
+  mock_data$fims_log2,
+  mock_data$lcms_log2,
+  method = "pearson"
+)
+
+r_squared <- round(
+  r_val^2,
+  3
+)
+
+
+p_scatter <- ggplot(
+  mock_data,
+  aes(
+    x = fims_log2,
+    y = lcms_log2
+  )
+) +
+  
+  geom_point(
+    alpha = 0.6,
+    color = "#1B9E77",
+    size = 1
+  ) +
+  
+  geom_smooth(
+    method = "lm",
+    se = TRUE,
+    color = "darkred",
+    linewidth = 0.6
+  ) +
+  
+  labs(
+    title = NULL,
+    subtitle = NULL,
+    x = "FI-MS Intensity",
+    y = "LC-MS Intensity"
+  ) +
+  
+  theme_bw(base_size = 6) +
+  theme(
+    axis.text = element_blank(),
+    axis.title = element_text(
+      size = 6,
+      face = "bold"
+    ),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    
+    panel.border = element_rect(
+      colour = "black",
+      fill = NA,
+      linewidth = 0.5
+    ),
+    
+    axis.line = element_blank(),
+    
+    axis.ticks = element_line(
+      linewidth = 0.4,
+      colour = "black"
+    ),
+    
+    plot.margin = margin(2, 2, 2, 2)
+  )
+
+
+save_fixed_panel(
+  plot = p_scatter,
+  filename = "Mock_Scatter_Plot.png"
+)
+
+
+
+# 6. MOCK DUAL-AXIS SPAGHETTI PLOT
+
+
+fims_range <- range(
+  mock_data$fims_intensity,
+  na.rm = TRUE
+)
+
+lcms_range <- range(
+  mock_data$lcms_intensity,
+  na.rm = TRUE
+)
+
+
+plot_data <- mock_data %>%
+  mutate(
+    
+    lcms_scaled =
+      rescale_to_range(
+        lcms_intensity,
+        fims_range[1],
+        fims_range[2]
+      )
+  )
+
+
+fims_mean <- plot_data %>%
+  group_by(Visit) %>%
+  summarise(
+    mean_val =
+      median(
+        fims_intensity,
+        na.rm = TRUE
+      ),
+    .groups = "drop"
+  )
+
+
+lcms_mean <- plot_data %>%
+  group_by(Visit) %>%
+  summarise(
+    mean_val =
+      median(
+        lcms_scaled,
+        na.rm = TRUE
+      ),
+    .groups = "drop"
+  )
+
+
+inverse_rescale <- function(y) {
+  
+  (
+    (y - fims_range[1]) /
+      (fims_range[2] - fims_range[1])
+  ) *
+    diff(lcms_range) +
+    lcms_range[1]
+}
+
+
+p_dual <- ggplot(
+  plot_data,
+  aes(x = Visit)
+) +
+  
+  geom_line(
+    aes(
+      y = fims_intensity,
+      group = PseudoID
+    ),
+    color = "#1B9E77",
+    alpha = 0.2,
+    linewidth = 0.4
+  ) +
+  
+  geom_line(
+    aes(
+      y = lcms_scaled,
+      group = PseudoID
+    ),
+    color = "#7570B3",
+    alpha = 0.2,
+    linewidth = 0.4
+  ) +
+  
+  geom_line(
+    data = fims_mean,
+    aes(
+      y = mean_val,
+      group = 1
+    ),
+    color = "#1B9E77",
+    linewidth = 0.8
+  ) +
+  
+  geom_point(
+    data = fims_mean,
+    aes(y = mean_val),
+    color = "#1B9E77",
+    size = 1,
+    shape = 21,
+    fill = "white",
+    stroke = 1.3
+  ) +
+  
+  geom_line(
+    data = lcms_mean,
+    aes(
+      y = mean_val,
+      group = 1
+    ),
+    color = "#7570B3",
+    linewidth = 0.8,
+    linetype = "dashed"
+  ) +
+  
+  geom_point(
+    data = lcms_mean,
+    aes(y = mean_val),
+    color = "#7570B3",
+    size = 1,
+    shape = 21,
+    fill = "white",
+    stroke = 1.3
+  ) +
+  
+  scale_y_continuous(
+    
+    name = "FI-MS Intensity",
+    
+    labels = format_scientific,
+    
+    sec.axis =
+      sec_axis(
+        trans = ~ inverse_rescale(.),
+        name = "LC-MS Intensity",
+        labels = format_scientific
+      ),
+    
+    n.breaks = 4
+  ) +
+  
+  labs(
+    title = NULL,
+    x = "Visit"
+  ) +
+  
+  theme_bw(base_size = 6) +
+  theme(
+    axis.title.x = element_text(
+      size = 6,
+      face = "bold",
+      margin = margin(t = 2)
+    ),
+    
+    axis.title.y.left = element_text(
+      color = "#1B9E77",
+      face = "bold",
+      size = 6,
+      margin = margin(r = 2)
+    ),
+    
+    axis.text.y.left = element_blank(),
+    
+    axis.title.y.right = element_text(
+      color = "#7570B3",
+      face = "bold",
+      size = 6,
+      margin = margin(l = 2)
+    ),
+    
+    axis.text.y.right = element_blank(),
+    axis.text.x = element_blank(),
+    
+    axis.ticks = element_line(
+      linewidth = 0.25,
+      colour = "black"
+    ),
+    
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    
+    panel.border = element_rect(
+      colour = "black",
+      fill = NA,
+      linewidth = 0.5
+    ),
+    
+    axis.line = element_blank(),
+    
+    plot.margin = margin(2, 3, 3, 3)
+  )
+
+
+# >>> EXPORT <<<
+save_fixed_panel(
+  plot = p_dual,
+  filename = "Mock_DualSpaghetti_Plot.png"
+)
+
+
+
+# 7. MOCK ELASTIC-NET BARPLOT
+
+
+df_filtered <- tibble::tibble(
+  
+  Clinical_Trait =
+    c(
+      "Triglycerides",
+      "Glucose"
+    ),
+  
+  LC.MS =
+    c(
+      0.15,
+      0.97
+    ),
+  
+  FI.MS =
+    c(
+      0.57,
+      0.94
+    )
+  
+) %>%
+  
+  mutate(
+    
+    Max_R2 =
+      pmax(
+        LC.MS,
+        FI.MS,
+        na.rm = TRUE
+      )
+    
+  ) %>%
+  
+  arrange(Max_R2) %>%
+  
+  mutate(
+    
+    Clinical_Trait =
+      factor(
+        Clinical_Trait,
+        levels = Clinical_Trait
+      )
+    
+  )
+
+
+df_long <- df_filtered %>%
+  
+  pivot_longer(
+    
+    cols =
+      c(
+        "LC.MS",
+        "FI.MS"
+      ),
+    
+    names_to = "Method",
+    
+    values_to = "R2"
+    
+  )
+
+
+p_mock <- ggplot(
+  
+  df_long,
+  
+  aes(
+    x = R2,
+    y = Clinical_Trait,
+    fill = Method
+  )
+  
+) +
+  
+  geom_col(
+    
+    position =
+      position_dodge(
+        width = 0.85
+      ),
+    
+    width = 0.55,
+    
+    colour = "black",
+    
+    linewidth = 0.3
+    
+  ) +
+  
+  scale_fill_manual(
+    
+    values =
+      c(
+        "LC.MS" = "#7570B3",
+        "FI.MS" = "#1B9E77"
+      ),
+    
+    labels =
+      c(
+        "LC.MS" = "LC-MS",
+        "FI.MS" = "FI-MS"
+      )
+    
+  ) +
+  
+  scale_x_continuous(
+    
+    limits = c(0, 1),
+    
+    breaks =
+      c(
+        0,
+        1
+      ),
+    
+    labels =
+      c(
+        "0",
+        "1"
+      ),
+    
+    expand =
+      expansion(
+        mult =
+          c(
+            0,
+            0.05
+          )
+      )
+    
+  ) +
+  
+  labs(
+    
+    x =
+      expression(
+        bold("10-Fold CV") ~ bold(R^2)
+      ),
+    
+    y = NULL,
+    
+    fill = NULL
+    
+  ) +
+  
+  theme_bw(base_size = 6) +
+  theme(
+    plot.title = element_blank(),
+    plot.subtitle = element_blank(),
+    
+    axis.title.y = element_text(
+      size = 4,
+      color = "black"
+    ),
+    
+    axis.title.x = element_text(
+      size = 6,
+      face = "bold",
+      color = "black",
+      margin = margin(t = 0, r = 0, b = 0, l = 0) 
+    ),
+    
+    axis.text.x = element_text(
+      size = 6,
+      face = "bold",
+      color = "black",
+      margin = margin(t = 0, r = 0, b = 0, l = 0) 
+    ),
+    
+    axis.text.y = element_text(
+      size = 6,
+      color = "black"
+    ),
+    
+    legend.title = element_text(
+      size = 4,
+      color = "black"
+    ),
+    
+    legend.text = element_text(
+      size = 6,
+      color = "black"
+    ),
+    
+    legend.key.size = unit(0.3, "lines"),
+    legend.spacing.y = unit(0.1, "lines"),
+    
+    legend.margin = ggplot2::margin(
+      0, 0, 0, 0
+    ),
+    
+    legend.box.spacing = unit(
+      1,
+      "pt"
+    ),
+    
+    plot.margin = ggplot2::margin(
+      2, 2, 2, 2,
+      unit = "pt"
+    ),
+    
+    # SAME BLACK OUTLINE
+    panel.border = element_rect(
+      colour = "black",
+      fill = NA,
+      linewidth = 0.5
+    ),
+    
+    axis.line = element_blank(),
+    
+    axis.ticks = element_line(
+      linewidth = 0.4,
+      colour = "black"
+    ),
+    
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.grid.major.y = element_blank(),
+    
+    legend.position = "top",
+    legend.justification = "center",
+    legend.key = element_blank()
+  )
+
+
+# >>> EXPORT <<<
+save_fixed_panel(
+  plot = p_mock,
+  filename = "ElasticNet_R2_Barplot_MOCK.png"
+)
+

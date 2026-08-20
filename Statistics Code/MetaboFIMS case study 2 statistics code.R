@@ -351,29 +351,39 @@ for (mode in names(file_paths)) {
   brewer_cols <- colorRampPalette(brewer.pal(min(n_groups, 8), "Dark2"))(n_groups)
   
   p_pca <- ggplot(pca_df, aes(x = PC1, y = PC2, color = class)) +
-    geom_point(size = 1.5, alpha = 0.8) +
-    stat_ellipse(type = "norm", level = 0.95, linetype = 1, linewidth = 0.5) +
+    geom_point(size = 1, alpha = 0.8) +
+    stat_ellipse(type = "norm", level = 0.95, linetype = 1, linewidth = 0.3) +
     scale_color_manual(values = brewer_cols) +
     labs(title = paste0("PCA EmDia [ESI", toupper(mode), "]"),
          x = pc1_lab, y = pc2_lab) +
-    theme_bw(base_size = 8) +
+    theme_bw(base_size = 6) +
     theme(
       panel.grid.major  = element_line(color = "grey85"),
       panel.grid.minor  = element_blank(),
-      axis.text         = element_text(color = "black", size = 8),
-      axis.title        = element_text(size = 8),
+      axis.text         = element_text(color = "black", size = 5),
+      axis.title        = element_text(size = 5),
       plot.title        = element_blank(),
       legend.title      = element_blank(),
       legend.key        = element_blank(),
-      legend.text       = element_text(size = 6),
+      legend.text       = element_text(size = 3),
       legend.key.size   = unit(0.3, "lines"),
-      legend.spacing.y  = unit(0.1, "lines"),
-      legend.position   = "bottom"
-    )
+      legend.spacing.y  = unit(0.01, "lines"),
+      legend.position   = "bottom",
+      
+      # 1. Expand plot margins slightly (top, right, bottom, left in points)
+      # This explicitly gives ggsave extra breathing room on the right and bottom sides.
+      plot.margin       = margin(2, 6, 4, 2, unit = "pt") 
+    ) +
+    # 2. Control the guide layout to ensure it wraps and fits nicely
+    guides(color = guide_legend(
+      nrow = 2,                 # Dynamically split into 2 rows if items are long
+      byrow = TRUE,             # Fill row by row
+      keywidth = unit(0.2, "lines") # Narrow down the colored key itself
+    ))
   
   print(p_pca)
   ggsave(file.path(out_dir, paste0("PCA_EmDia_full_data_", mode, ".png")),
-         p_pca, width = 2.3, height = 2, dpi = 300)
+         p_pca, width = 1.38, height = 1.1, dpi = 600)
   
   samples_only        <- dat[dat$class == "Sample", ]
   samples_only$batch  <- factor(samples_only$batch)
@@ -421,7 +431,7 @@ for (mode in names(file_paths)) {
   
   print(p_pca_batch)
   ggsave(file.path(out_dir, paste0("PCA_EmDia_samples_by_batch_", mode, ".png")),
-         p_pca_batch, width = 2.3, height = 2, dpi = 300)
+         p_pca_batch, width = 2.3, height = 2, dpi = 600)
   
   dat_cv <- dat %>%
     filter(xor(class == "QC", class == "Sample")) %>%
@@ -472,7 +482,7 @@ for (mode in names(file_paths)) {
   
   print(p_cv)
   ggsave(file.path(out_dir, paste0("CVs_EmDia_", mode, ".png")),
-         p_cv, width = 9, height = 7, dpi = 300)
+         p_cv, width = 9, height = 7, dpi = 600)
   
   dat_stats <- dat %>%
     filter(xor(Group == "Empagliflozin", Group == "Placebo")) %>%
@@ -575,30 +585,39 @@ for (mode in names(file_paths)) {
       scale_x_discrete(labels = x_labels) +
       geom_segment(data = annotation_box,
                    aes(x = xstart, xend = xend, y = yline, yend = yline),
-                   inherit.aes = FALSE, linewidth = 0.8) +
+                   inherit.aes = FALSE, linewidth = 0.3) + # Scaled down line width for micro-plot
       geom_text(data = annotation_box,
                 aes(x = x, y = y, label = significance),
-                inherit.aes = FALSE, vjust = 0.5, size = 3.5) +
+                inherit.aes = FALSE, vjust = 0.5, 
+                size = 5 / .pt) + # Converts font size 5 properly into millimeter units
       labs(y = "Relative Intensity (%)", x = NULL) +
       scale_y_continuous(expand = expansion(mult = c(0, 0.05))) +
-      theme_minimal(base_size = 8) +
+      theme_minimal(base_size = 6) + 
       theme(
-        plot.title     = element_blank(),
-        plot.subtitle  = element_blank(),
-        axis.title     = element_text(size = 8),
-        axis.text.x    = element_text(angle = 90, hjust = 1, size = 8),
-        axis.text.y    = element_text(size = 8),
-        legend.title   = element_text(size = 8),
-        legend.text    = element_text(size = 8),
+        plot.title        = element_blank(),
+        plot.subtitle     = element_blank(),
+        axis.title        = element_text(size = 5),
+        axis.text.x       = element_text(angle = 90, hjust = 1, size = 5),
+        axis.text.y       = element_text(size = 5),
+        legend.title      = element_blank(), # Removed title to perfectly match PCA legend layout
+        legend.text       = element_text(size = 3),
         legend.key.size   = unit(0.3, "lines"),
-        legend.spacing    = unit(0.1, "lines"),
-        legend.margin     = ggplot2::margin(0, 0, 0, 0),
-        plot.margin       = ggplot2::margin(2, 2, 2, 2, unit = "pt")
-      )
+        legend.spacing.y  = unit(0.01, "lines"),
+        legend.position   = "right",
+        
+        # Mirroring the PCA margin breathing-room approach
+        plot.margin       = margin(2, 6, 4, 2, unit = "pt")
+      ) +
+      # Consistent legend squeezing and wrapping control
+      guides(fill = guide_legend(
+        nrow = 2,                 # Dynamic 2-row splitting for narrow plots
+        byrow = TRUE,             
+        keywidth = unit(0.2, "lines") 
+      ))
     
     print(p_box)
     ggsave(file.path(out_dir, paste0("Boxplot_UricAcid_15AG_", mode, ".png")),
-           p_box, width = 2.3, height = 3, dpi = 300)
+           p_box, width = 1.22, height = 1.59, dpi = 600) #was 2.3 and 3!
   }
   
   message("✅  Done: ", toupper(mode))
@@ -631,7 +650,7 @@ library(grid)
 
 
 if (.Platform$OS.type == "unix") {
-  Elastic_Net <- "/Volumes/T7/Arbeit/FIA/EmDia_NEU/Elastic_Net.csv"
+  Elastic_Net <- "/Users/fabianschmitt/Desktop/Arbeit/FIA/EmDia_NEU/Elastic_Net.csv"
 } else {
   Elastic_Net <- "D:/Arbeit/FIA/EmDia_NEU/Elastic_Net.csv"
 }
@@ -676,26 +695,26 @@ p <- ggplot(
     fill = Method
   )
 ) +
-
+  
   geom_vline(
     xintercept = r2_cutoff,
     linetype = "dashed",
     color = "grey50",
     linewidth = 0.5
   ) +
-
+  
   geom_col(
     position = position_dodge(width = 0.85), 
     width = 0.55,                            
     colour = "black",
     linewidth = 0.3
   ) +
-
+  
   geom_text(
     aes(label = sprintf("%.2f", R2)),
     position = position_dodge(width = 0.85), 
     hjust = -0.2,
-    size = 2, 
+    size = 2.5, 
     color = "black"
   ) +
   scale_fill_manual(
@@ -708,7 +727,7 @@ p <- ggplot(
       "FI.MS" = "FI-MS"
     )
   ) +
-
+  
   scale_x_continuous(
     limits = c(0, 1),
     breaks = seq(0, 1, 0.2),
@@ -720,24 +739,24 @@ p <- ggplot(
     y = NULL,
     fill = NULL
   ) +
-
-  theme_bw(base_size = 8) +
+  
+  theme_bw(base_size = 6) +
   theme(
-
+    
     plot.title         = element_blank(),
     plot.subtitle      = element_blank(),
-    axis.title         = element_text(size = 8, color = "black"),
-
-    axis.text.x        = element_text(size = 8, color = "black"), 
-    axis.text.y        = element_text(size = 8, color = "black"),
-    legend.title       = element_text(size = 8, color = "black"),
-    legend.text        = element_text(size = 8, color = "black"),
+    axis.title         = element_text(size = 6, color = "black"),
+    
+    axis.text.x        = element_text(size = 6, color = "black"), 
+    axis.text.y        = element_text(size = 6, color = "black"),
+    legend.title       = element_text(size = 6, color = "black"),
+    legend.text        = element_text(size = 6, color = "black"),
     legend.key.size    = unit(0.3, "lines"),
     legend.spacing.y   = unit(0.1, "lines"), 
     legend.margin      = ggplot2::margin(0, 0, 0, 0),
     plot.margin        = ggplot2::margin(2, 2, 2, 2, unit = "pt"),
     
-
+    
     panel.border       = element_rect(color = "black", fill = NA, linewidth = 0.5),
     axis.line          = element_blank(),
     axis.ticks         = element_line(linewidth = 0.4, color = "black"),
@@ -758,7 +777,7 @@ plot_height <- max(3, nrow(df_filtered) * 0.20)
 ggsave(
   filename = file.path(import_dir, "ElasticNet_R2_Barplot.png"),
   plot = p,
-  width = 4.7, 
+  width = 3.33, 
   height = plot_height,
   units = "in",
   dpi = 600
