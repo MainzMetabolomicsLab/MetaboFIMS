@@ -84,11 +84,11 @@ ui <- fluidPage(
       fluidRow(
         column(9, textInput("script_path", "R Script",
                             value = default_path(
-                              win = file.path("Filepath",
+                              win = file.path("C:/Users/fabia/Seafile/Meine Bibliothek/FIA",
                                               "MetaboFIMS V1.0.R"),
-                              mac = file.path("/Filepath",
+                              mac = file.path("/Users/fabianschmitt/Seafile/Meine Bibliothek/FIA",
                                               "MetaboFIMS V1.0.R"),
-                              linux = file.path("/Filepath",
+                              linux = file.path("/home", "User", "etc.",
                                                 "MetaboFIMS V1.0.R")
                             ))),
         column(3, shinyFilesButton("browse_script", "Browse", "Choose R script", multiple = FALSE))
@@ -96,8 +96,8 @@ ui <- fluidPage(
       fluidRow(
         column(9, textInput("data_dir", "Processing data directory (data_dir)",
                             value = default_path(
-                              win = file.path("Filepath_to_", "processing"),
-                              mac = file.path("/Filepath_to_/processing"),
+                              win = file.path("D:", "Arbeit", "FIA", "processing"),
+                              mac = file.path("/Volumes/T7/Arbeit/FIA/processing"),
                               linux = file.path("~/processing")
                             ))),
         column(3, shinyDirButton("browse_data_dir", "Browse", "Choose folder"))
@@ -105,8 +105,8 @@ ui <- fluidPage(
       fluidRow(
         column(9, textInput("raw_dir", "Raw files directory (data_dir_raw_files)",
                             value = default_path(
-                              win = file.path("Filepath_to_/processing", "raw_mzML"),
-                              mac = file.path("Filepath_to_/processing/raw_mzML"),
+                              win = file.path("D:", "Arbeit", "FIA", "processing", "raw_mzML"),
+                              mac = file.path("/Volumes/T7/Arbeit/FIA/processing/raw_mzML"),
                               linux = file.path("~/processing/raw_mzML")
                             ))),
         column(3, shinyDirButton("browse_raw_dir", "Browse", "Choose folder"))
@@ -114,9 +114,9 @@ ui <- fluidPage(
       fluidRow(
         column(9, textInput("file_path", "HMDB annotation CSV (file_path)",
                             value = default_path(
-                              win = file.path("Filepath_to_", "HMDB_BLOOD_ENDO_FOOD_DRUG_DRUGMET.csv"),
-                              mac = file.path("/Filepath_to_/HMDB_BLOOD_ENDO_FOOD_DRUG_DRUGMET.csv"),
-                              linux = file.path("~/HMDB_BLOOD_ENDO_FOOD_DRUG_DRUGMET.csv")
+                              win = file.path("D:", "Arbeit", "FIA", "HMDB_BLOOD_ENDO_FOOD_DRUG_DRUGMET.csv"),
+                              mac = file.path("/Volumes/T7/Arbeit/FIA/HMDB_BLOOD_ENDO_FOOD_DRUG_DRUGMET.csv"),
+                              linux = file.path("~/HMDB_BLOOD.csv")
                             ))),
         column(3, shinyFilesButton("browse_file_path", "Browse", "Choose CSV", multiple = FALSE))
       ),
@@ -124,6 +124,10 @@ ui <- fluidPage(
       h4("RT integration window (seconds) for 1D spectra accumulation"),
       numericInput("rt_min", "rt_min (s)", value = 5, min = 0, step = 1),
       numericInput("rt_max", "rt_max (s)", value = 25, min = 0, step = 1),
+      hr(),
+      h4("Mass range (m/z) limits"),
+      numericInput("mz_min_limit", "mz_min_limit", value = 80, min = 0, step = 1),
+      numericInput("mz_max_limit", "mz_max_limit", value = 1000, min = 0, step = 1),
       hr(),
       h4("Export of Spectra"),
       checkboxInput("EXPORT_SPECTRA", "Export 1D spectra as .mzML", value = FALSE),
@@ -292,7 +296,7 @@ server <- function(input, output, session) {
   observeEvent(input$raw_dir, {
     pol <- detect_polarity(input$raw_dir)
     if (!is.null(pol)) {
-
+      
       isolate({
         if (is.null(input$.last_manual_ion) || input$.last_manual_ion != TRUE) {
           updateRadioButtons(session, "Ionization_method", selected = pol)
@@ -303,7 +307,7 @@ server <- function(input, output, session) {
   
   observeEvent(input$Ionization_method, {
     session$sendCustomMessage("ion_manual", list(val = TRUE))
-
+    
     session$userData$ion_manual <- TRUE
   }, ignoreInit = TRUE)
   
@@ -322,7 +326,9 @@ server <- function(input, output, session) {
       ppm_tolerance = input$ppm_tolerance,
       ppm_tolerance_annotation = input$ppm_tolerance_annotation,
       rt_min = input$rt_min,
-      rt_max = input$rt_max
+      rt_max = input$rt_max,
+      mz_min_limit = input$mz_min_limit,
+      mz_max_limit = input$mz_max_limit
     )
   }
   
@@ -355,6 +361,8 @@ server <- function(input, output, session) {
       updateNumericInput(session, "ppm_tolerance_annotation", value = cfg$ppm_tolerance_annotation %||% input$ppm_tolerance_annotation)
       updateNumericInput(session, "rt_min", value = cfg$rt_min %||% input$rt_min)
       updateNumericInput(session, "rt_max", value = cfg$rt_max %||% input$rt_max)
+      updateNumericInput(session, "mz_min_limit", value = cfg$mz_min_limit %||% input$mz_min_limit)
+      updateNumericInput(session, "mz_max_limit", value = cfg$mz_max_limit %||% input$mz_max_limit)
       showNotification("Config loaded", type = "message")
       append_log(paste("Loaded config from", f$name))
     }, error = function(e) {
@@ -382,15 +390,15 @@ server <- function(input, output, session) {
       
       updateTextInput(session, "data_dir",
                       value = default_path(
-                        win = file.path("Filepath_to_", "processing"),
-                        mac = file.path("Filepath_to_/processing"),
+                        win = file.path("D:", "Arbeit", "FIA", "processing"),
+                        mac = file.path("/Volumes/T7/Arbeit/FIA/processing"),
                         linux = file.path("~/processing")
                       ))
       
       updateTextInput(session, "raw_dir",
                       value = default_path(
-                        win = file.path("Filepath_to_/processing", "raw_mzML"),
-                        mac = file.path("/Filepath_to_/processingraw_mzML"),
+                        win = file.path("D:", "Arbeit", "FIA", "processing", "raw_mzML"),
+                        mac = file.path("/Volumes/T7/Arbeit/FIA/processing/raw_mzML"),
                         linux = file.path("~/processing/raw_mzML")
                       ))
       
@@ -399,19 +407,18 @@ server <- function(input, output, session) {
       
       updateTextInput(session, "data_dir",
                       value = default_path(
-                        win = file.path("Filepath_to_", "processing_neg"),
-                        mac = file.path("/Filepath_to_/processing_neg"),
+                        win = file.path("D:", "Arbeit", "FIA", "processing_neg"),
+                        mac = file.path("/Volumes/T7/Arbeit/FIA/processing_neg"),
                         linux = file.path("~/processing_neg")
                       ))
       
       updateTextInput(session, "raw_dir",
                       value = default_path(
-                        win = file.path("/Filepath_to_/processing_neg", "raw_mzML"),
-                        mac = file.path("/Filepath_to_/processing_neg/raw_mzML"),
+                        win = file.path("D:", "Arbeit", "FIA", "processing_neg", "raw_mzML"),
+                        mac = file.path("/Volumes/T7/Arbeit/FIA/processing_neg/raw_mzML"),
                         linux = file.path("~/processing_neg/raw_mzML")
                       ))
       
-
     }
   }, ignoreNULL = TRUE, ignoreInit = FALSE)
   
@@ -483,6 +490,11 @@ server <- function(input, output, session) {
     if (!nzchar(input$file_path) || !file.exists(input$file_path)) errs <- c(errs, "HMDB CSV not found.")
     mzmls <- list.files(input$raw_dir, pattern = "\\.(mzXML|mzML)$", ignore.case = TRUE)
     if (length(mzmls) == 0) errs <- c(errs, "No mzML files found in raw_dir.")
+    if (is.na(input$mz_min_limit) || is.na(input$mz_max_limit)) {
+      errs <- c(errs, "mz_min_limit and mz_max_limit must be set.")
+    } else if (input$mz_min_limit >= input$mz_max_limit) {
+      errs <- c(errs, "mz_min_limit must be smaller than mz_max_limit.")
+    }
     if (length(errs)) return(paste(errs, collapse = "\n"))
     return(NULL)
   }
@@ -576,7 +588,7 @@ server <- function(input, output, session) {
         if (length(err) && any(nzchar(err))) {
           for (ln in err[nzchar(err)]) append_log(paste0(">: ", ln))
         } else {
-
+          
           if (is.na(rv$progress_total)) {
             mzmls <- list.files(input$raw_dir, pattern = "\\.(mzXML|mzML)$", ignore.case = TRUE, full.names = TRUE)
             if (length(mzmls) > 0) {
@@ -627,3 +639,4 @@ server <- function(input, output, session) {
 }
 
 shinyApp(ui, server)
+

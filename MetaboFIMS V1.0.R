@@ -386,8 +386,8 @@ gc()
 # =============================
 
   {
-    mz_min_limit <- 70
-    mz_max_limit <- 850
+    if (!exists("mz_min_limit")) mz_min_limit <- 70
+    if (!exists("mz_max_limit")) mz_max_limit <- 850
     
     sample_names <- rownames(feature_matrix_df)
     mz_values <- suppressWarnings(as.numeric(colnames(feature_matrix_df)))
