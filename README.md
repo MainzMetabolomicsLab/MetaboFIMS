@@ -71,7 +71,7 @@ The app installs missing packages automatically on first launch. You will need a
 
 3. **Run the app:**
    ```r
-   shiny::runApp("app.R")
+   shiny::runApp("MetaboFIMS V1.0 SHINY.R")
    ```
    On first launch, missing packages are installed automatically. This may take several minutes, depending on how many packages need to be installed first.
 
