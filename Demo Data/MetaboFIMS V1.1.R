@@ -18,6 +18,100 @@
   library(mzR)
 }
 
+# =============================
+# OUTPUT FOLDERS (set by the Shiny app; sensible fallbacks when the script is run on its own)
+#   output_dir      : every result file (CSV) of THIS run goes here  -> <data_dir>/<custom name or date_time>
+#   mzml_export_dir : exported mzML spectra go here                  -> the processing folder (data_dir)
+#   output_subdirs  : optional named list of subfolders inside output_dir
+# =============================
+{
+  if (!exists("mzml_export_dir") || !nzchar(mzml_export_dir)) mzml_export_dir <- data_dir
+  if (!exists("output_dir") || !nzchar(output_dir)) {
+    output_dir <- file.path(sub("/+$", "", data_dir), format(Sys.time(), "%Y-%m-%d_%H-%M-%S"))
+  }
+  if (!exists("output_subdirs") || is.null(output_subdirs)) output_subdirs <- list()
+  dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
+  
+  # Path of a result file: inside output_dir, or inside one of the named subfolders of output_subdirs
+  out_file <- function(file, sub = NULL) {
+    d <- if (!is.null(sub) && !is.null(output_subdirs[[sub]])) output_subdirs[[sub]] else output_dir
+    dir.create(d, recursive = TRUE, showWarnings = FALSE)
+    file.path(d, file)
+  }
+  message("Output folder (results / CSV): ", output_dir)
+  message("mzML export folder: ", mzml_export_dir)
+  
+  # Scan polarity written into exported mzML files: 1 = positive, 0 = negative (Spectra / mzR convention)
+  export_polarity <- if (identical(get0("Ionization_method", inherits = TRUE, ifnotfound = "Positive"), "Negative")) 0L else 1L
+  message("Exported mzML polarity: ", if (export_polarity == 0L) "negative (0)" else "positive (1)")
+}
+
+# =============================
+# REPRODUCIBILITY: run_parameters.yml (written into every output folder)
+#   written at the start (status "started"), extended once the samples are known,
+#   closed at the very end of the script (status "completed").
+# =============================
+{
+  rp <- new.env()
+  rp$data <- list()
+  run_started_time <- Sys.time()
+  
+  update_run_parameters <- function(new) {
+    tryCatch({
+      rp$data[names(new)] <- new
+      yaml::write_yaml(rp$data, file.path(output_dir, "run_parameters.yml"),
+                       handlers = list(logical = yaml::verbatim_logical))
+    }, error = function(e) warning("Could not write run_parameters.yml: ", conditionMessage(e), call. = FALSE))
+    invisible(NULL)
+  }
+  
+  md5_of <- function(f) {
+    f <- if (is.null(f) || length(f) != 1L || is.na(f)) "" else as.character(f)
+    if (nzchar(f) && file.exists(f)) unname(tools::md5sum(f)) else NA_character_
+  }
+  
+  get_session_info <- function() {
+    si  <- sessionInfo()
+    ver <- function(l) as.list(vapply(l, function(p) as.character(p$Version), character(1)))
+    list(
+      r_version         = si$R.version$version.string,
+      platform          = si$platform,
+      os                = if (is.null(si$running)) NA_character_ else si$running,
+      locale            = si$locale,
+      attached_packages = ver(si$otherPkgs),
+      loaded_packages   = ver(si$loadedOnly),
+      base_packages     = as.list(si$basePkgs)
+    )
+  }
+  
+  get_var <- function(nm, default = NA_character_) get0(nm, inherits = TRUE, ifnotfound = default)
+  list_or_note <- function(x) if (length(x)) as.list(as.character(x)) else "not set - all HMDB rows used"
+  
+  settings_names <- c("Ionization_method", "rt_min", "rt_max", "mz_min_limit", "mz_max_limit",
+                      "EXPORT_SPECTRA", "apply_smoothing", "smoothing_n", "smoothing_p",
+                      "intensity_threshold", "ppm_tolerance", "ppm_tolerance_annotation")
+  run_settings <- setNames(lapply(settings_names, get_var), settings_names)
+  
+  script_path_used <- get_var("pipeline_script_path", "")
+  
+  update_run_parameters(list(
+    run_status      = "started",
+    run_started     = format(run_started_time, "%Y-%m-%d %H:%M:%S %z"),
+    pipeline_script = list(path = script_path_used, md5 = md5_of(script_path_used)),
+    folders         = list(data_dir           = get_var("data_dir"),
+                           data_dir_raw_files = get_var("data_dir_raw_files"),
+                           output_dir         = output_dir,
+                           mzml_export_dir    = mzml_export_dir),
+    hmdb            = list(csv         = get_var("file_path"),
+                           md5         = md5_of(get_var("file_path", "")),
+                           biospecimen = list_or_note(get_var("hmdb_biospecimen", NULL)),
+                           origin      = list_or_note(get_var("hmdb_origin", NULL))),
+    settings        = run_settings,
+    session_info    = get_session_info()
+  ))
+  message("Run parameters: ", file.path(output_dir, "run_parameters.yml"))
+}
+
 {
   {
     HMDB_Metabolites <- fread(file_path)
@@ -61,9 +155,11 @@
     if (file.exists(resampled_data_file)) {
       message("Resampled data RDS already exists. Loading from file...")
       resampled_data_list <- readRDS(resampled_data_file)
+      resampled_data_source <- "rds_cache"
       
     } else {
       message("No RDS found. Processing mzML/mzXML files using RT-window...")
+      resampled_data_source <- "raw_files"
       
       for (file in mzxml_files) {
         processed_files <- processed_files + 1
@@ -84,13 +180,46 @@
       
       message("Saved RT-window resampled data to RDS.")
     }
+    
+    # ---- Reproducibility: record exactly which samples enter this run ----
+    # Names are taken from resampled_data_list, i.e. from the .rds when it was loaded.
+    {
+      sample_names_used <- names(resampled_data_list)
+      current_raw_names <- basename(tools::file_path_sans_ext(mzxml_files))
+      samples_info <- list(
+        source    = if (resampled_data_source == "rds_cache")
+          "resampled_data.rds (cached - raw files were NOT re-read)" else
+            "raw mzML/mzXML files (RT-window integration run in this session)",
+        n_samples = length(sample_names_used),
+        names     = as.list(sample_names_used)
+      )
+      if (resampled_data_source == "rds_cache") {
+        samples_info$rds_file     <- resampled_data_file
+        samples_info$rds_modified <- format(file.mtime(resampled_data_file), "%Y-%m-%d %H:%M:%S")
+        only_rds    <- setdiff(sample_names_used, current_raw_names)
+        only_folder <- setdiff(current_raw_names, sample_names_used)
+        samples_info$in_rds_but_not_in_raw_folder <- as.list(only_rds)
+        samples_info$in_raw_folder_but_not_in_rds <- as.list(only_folder)
+        if (length(only_rds) || length(only_folder)) {
+          warning("The cached resampled_data.rds does not match the files currently in the raw folder ",
+                  "(see 'samples' in run_parameters.yml). Delete the .rds to reprocess the raw files.",
+                  call. = FALSE, immediate. = TRUE)
+        }
+      } else {
+        samples_info$raw_files        <- as.list(basename(mzxml_files))
+        samples_info$rds_file_written <- resampled_data_file
+      }
+      update_run_parameters(list(samples = samples_info))
+      message("Samples used (", length(sample_names_used), ", source: ", resampled_data_source, "): ",
+              paste(sample_names_used, collapse = ", "))
+    }
   }
 }
 
 if (EXPORT_SPECTRA) {
   
   
-  export_dir <- file.path(data_dir, "accumulated_mzML")
+  export_dir <- file.path(mzml_export_dir, "accumulated_mzML")
   dir.create(export_dir, showWarnings = FALSE)
   
   for (sample_name in names(resampled_data_list)) {
@@ -122,7 +251,7 @@ if (EXPORT_SPECTRA) {
       scanWindowUpperLimit = mz_max_limit,
       tic = tic_value,
       scanIndex = 1L,
-      polarity = 1L
+      polarity = export_polarity
     )
     
     sps <- Spectra(spectra_data, backend = MsBackendMemory())
@@ -395,7 +524,7 @@ if (EXPORT_SPECTRA) {
   library(S4Vectors)
   library(mzR)
   
-  export_dir <- file.path(data_dir, "accumulated_smoothed_mzML")
+  export_dir <- file.path(mzml_export_dir, "accumulated_smoothed_mzML")
   dir.create(export_dir, showWarnings = FALSE)
   
   for (sample_name in names(resampled_data_list)) {
@@ -416,7 +545,8 @@ if (EXPORT_SPECTRA) {
       rtime = 10,
       msLevel = 1L,
       centroided = FALSE,
-      fromFile = 1L
+      fromFile = 1L,
+      polarity = export_polarity
     )
     
     sps <- Spectra(spectra_data, backend = MsBackendMemory())
@@ -437,7 +567,7 @@ if (EXPORT_SPECTRA) {
 if (EXPORT_SPECTRA) {
   message("📤 Exporting centroided spectra (EXPORT_SPECTRA = TRUE)")
   
-  centroided_export_dir <- file.path(data_dir, "centroided_mzML")
+  centroided_export_dir <- file.path(mzml_export_dir, "centroided_mzML")
   dir.create(centroided_export_dir, recursive = TRUE, showWarnings = FALSE)
   
   # Export the per-sample refined apexes generated in STEP 2.
@@ -489,7 +619,8 @@ if (EXPORT_SPECTRA) {
       scanWindowLowerLimit = min(mzs),
       scanWindowUpperLimit = max(mzs),
       tic = tic_value,
-      scanIndex = 1L
+      scanIndex = 1L,
+      polarity = export_polarity
     )
     
     sps <- Spectra::Spectra(
@@ -560,51 +691,70 @@ gc()
   ppm <- 10
   
   detect_isotopic_groups_with_numbers <- function(neutral_masses, intensities, mass_diff = 1.0033548378, ppm = 10) {
-    neutral_masses <- sort(neutral_masses)
-    intensities <- intensities[order(neutral_masses)]
+    # Sort masses and intensities together for isotope matching, but restore the
+    # original feature/column order before returning results to the caller.
+    if (length(neutral_masses) != length(intensities)) {
+      stop("neutral_masses and intensities must have the same length")
+    }
+    n <- length(neutral_masses)
+    original_order <- order(neutral_masses, na.last = TRUE)
+    sorted_masses <- neutral_masses[original_order]
+    sorted_intensities <- intensities[original_order]
     
-    labels <- rep("monoisotopic", length(neutral_masses))
-    group_numbers <- rep(NA, length(neutral_masses))
+    labels_sorted <- rep(NA_character_, n)
+    group_numbers_sorted <- rep(NA_integer_, n)
+    group_id <- 1L
+    used_indices <- rep(FALSE, n)
     
-    group_id <- 1
-    used_indices <- rep(FALSE, length(neutral_masses))
-    
-    for (i in seq_along(neutral_masses)) {
+    for (i in seq_len(n)) {
       if (used_indices[i]) next
+      base_mass <- sorted_masses[i]
+      base_intensity <- sorted_intensities[i]
+      # Missing/non-finite values cannot be used for isotope matching.
+      if (!is.finite(base_mass) || !is.finite(base_intensity)) next
       
-      base_mass <- neutral_masses[i]
-      base_intensity <- intensities[i]
       tol <- base_mass * ppm / 1e6
-      
       expected_m1 <- base_mass + mass_diff
-      m1_index <- which(abs(neutral_masses - expected_m1) <= tol & !used_indices)
+      m1_index <- which(is.finite(sorted_masses) &
+                          abs(sorted_masses - expected_m1) <= tol & !used_indices)
+      m1_index <- m1_index[m1_index != i]
       
-      if (length(m1_index) > 0 && intensities[m1_index[1]] < base_intensity) {
-        labels[i] <- "monoisotopic"
-        labels[m1_index[1]] <- "M+1"
-        group_numbers[c(i, m1_index[1])] <- group_id
-        used_indices[c(i, m1_index[1])] <- TRUE
+      if (length(m1_index) > 0 && is.finite(sorted_intensities[m1_index[1]]) &&
+          sorted_intensities[m1_index[1]] < base_intensity) {
+        m1 <- m1_index[1]
+        labels_sorted[i] <- "monoisotopic"
+        labels_sorted[m1] <- "M+1"
+        group_numbers_sorted[c(i, m1)] <- group_id
+        used_indices[c(i, m1)] <- TRUE
         
         expected_m2 <- base_mass + 2 * mass_diff
-        m2_index <- which(abs(neutral_masses - expected_m2) <= tol & !used_indices)
-        if (length(m2_index) > 0 &&
-            intensities[m2_index[1]] < base_intensity &&
-            intensities[m2_index[1]] < intensities[m1_index[1]]) {
-          labels[m2_index[1]] <- "M+2"
-          group_numbers[m2_index[1]] <- group_id
-          used_indices[m2_index[1]] <- TRUE
+        m2_index <- which(is.finite(sorted_masses) &
+                            abs(sorted_masses - expected_m2) <= tol & !used_indices)
+        m2_index <- m2_index[m2_index != i & m2_index != m1]
+        if (length(m2_index) > 0 && is.finite(sorted_intensities[m2_index[1]]) &&
+            sorted_intensities[m2_index[1]] < base_intensity &&
+            sorted_intensities[m2_index[1]] < sorted_intensities[m1]) {
+          m2 <- m2_index[1]
+          labels_sorted[m2] <- "M+2"
+          group_numbers_sorted[m2] <- group_id
+          used_indices[m2] <- TRUE
         }
         
-        group_id <- group_id + 1
+        group_id <- group_id + 1L
         next
       }
       
-      labels[i] <- "monoisotopic"
-      group_numbers[i] <- group_id
+      labels_sorted[i] <- "monoisotopic"
+      group_numbers_sorted[i] <- group_id
       used_indices[i] <- TRUE
-      group_id <- group_id + 1
+      group_id <- group_id + 1L
     }
     
+    # original_order maps sorted positions -> original positions.
+    labels <- rep(NA_character_, n)
+    group_numbers <- rep(NA_integer_, n)
+    labels[original_order] <- labels_sorted
+    group_numbers[original_order] <- group_numbers_sorted
     return(list(labels = labels, group_numbers = group_numbers))
   }
   message("Isotope groups detected with mass difference set to ", mass_diff, " Da and mass tolerance set to ", ppm, " ppm")
@@ -732,7 +882,7 @@ if (Ionization_method == "Positive") {
   }
   
   write.csv(feature_matrix_df_isotope,
-            file = file.path(data_dir, "feature_matrix_df_isotope.csv"),
+            file = out_file("feature_matrix_df_isotope.csv"),
             row.names = TRUE)
 }
 
@@ -740,7 +890,7 @@ if (Ionization_method == "Positive") {
 
 
 # =============================
-# Setting up parameters for RDISOP formula calculation of neutral masses with the use of the (six of) seven golden rules for heuristic filtering.
+# RDISOP formula calculation with explicit application of the implemented Golden-Rule-inspired filters.
 # =============================
 
 
@@ -769,7 +919,7 @@ if (Ionization_method == "Positive") {
     } else if (Da <= 1000) { 
       return(5)
     }}
-  message("RDISOP formula prediction using the seven golden rules for heuristic filtering, set to 10ppm mass tolerance for molecules < 300 Da and 5 ppm for molecules >300 Da")
+  message("RDISOP formula prediction: element-count limits, mass accuracy, isotope-pattern scoring, H/C, heteroatom ratios, element-probability, DBE, valence, and Rdisop validity filters are evaluated; final formula selection requires all hard filters to pass. Mass tolerance: 10 ppm through 300 Da, 5 ppm above 300 Da.")
   
   
   #Golden rule #1: Restriction for element numbers
@@ -995,8 +1145,10 @@ for (group in unique_groups) {
     masses <- neutral_mass_values[indices]
     intensities <- colMeans(feature_matrix_df[, indices, drop = FALSE], na.rm = TRUE)
     
+    # Rules #2-3: pass the mass-accuracy tolerance and observed isotope
+    # mass/intensity pattern to Rdisop for formula decomposition.
     molecules <- tryCatch(
-      decomposeIsotopes(masses, intensities, ppm = mz_dependent_mass_accuracy, z = 0, 
+      decomposeIsotopes(masses, intensities, ppm = mz_dependent_mass_accuracy, 
                         elements = essential_elements, 
                         minElements = min_elements,
                         maxElements = max_elements,
@@ -1142,6 +1294,20 @@ for (group in unique_groups) {
         Score = scores,
         Adjusted_Score = adjusted_scores,
         Valid = validities,
+        Valid_Rdisop = !is.na(validities) & tolower(trimws(as.character(validities))) == "valid",
+        Valid_HC = !is.na(hc_ratios) & is.finite(hc_ratios) &
+          hc_ratios >= 0.2 & hc_ratios <= 3.1,
+        Valid_Heteroatom_Ratios =
+          is.finite(hetero_ratios[, "NtoC"]) &
+          is.finite(hetero_ratios[, "OtoC"]) &
+          is.finite(hetero_ratios[, "PtoC"]) &
+          is.finite(hetero_ratios[, "StoC"]) &
+          hetero_ratios[, "NtoC"] < 1.3 &
+          hetero_ratios[, "OtoC"] < 1.2 &
+          hetero_ratios[, "PtoC"] < 0.3 &
+          hetero_ratios[, "StoC"] < 0.8,
+        Valid_Element_Probability = !is.na(element_probabilities) & element_probabilities,
+        Valid_DBE = !is.na(dbe_values) & is.finite(dbe_values) & dbe_values >= 0,
         DBE = dbe_values,
         HC_Ratio = hc_ratios,
         NtoC = hetero_ratios[, "NtoC"],
@@ -1157,21 +1323,48 @@ for (group in unique_groups) {
       
       molecular_data <- rbind(molecular_data, temp_df_all)
       
-      #Golden Rule #4: Hydrogen/Carbon element ratio check. Adapted from calcMF package
-      # Filter by H/C ratio
-      valid_hc <- is.na(hc_ratios) | (hc_ratios >= 0.2 & hc_ratios <= 3.1)
-      valid_indices <- which(valid_hc)
+      # Apply the formula filters together. These are neutral metabolite
+      # formulas, so require carbon before applying the organic H/C and
+      # heteroatom rules; an undefined ratio must not pass as NA.
+      has_carbon <- vapply(formulas, function(f) {
+        el <- parseFormulaElements(f)
+        "C" %in% names(el) && is.finite(as.numeric(el["C"])) && as.numeric(el["C"]) > 0
+      }, logical(1))
       
-      # Golden Rule #5: Heteroatom filter
-      # NtoC < 1.3; OtoC < 1.2; PtoC < 0.3; StoC < 0.8))
-      valid_hetero <- (
-        (is.na(hetero_ratios[, "NtoC"]) | hetero_ratios[, "NtoC"] < 1.3) &
-          (is.na(hetero_ratios[, "OtoC"]) | hetero_ratios[, "OtoC"] < 1.2) &
-          (is.na(hetero_ratios[, "PtoC"]) | hetero_ratios[, "PtoC"] < 0.3) &
-          (is.na(hetero_ratios[, "StoC"]) | hetero_ratios[, "StoC"] < 0.8)
+      # Golden Rule #4: hydrogen-to-carbon ratio.
+      valid_hc <- has_carbon & is.finite(hc_ratios) &
+        hc_ratios >= 0.2 & hc_ratios <= 3.1
+      
+      # Golden Rule #5: heteroatom-to-carbon ratios.
+      # Pipeline thresholds: N/C < 1.3; O/C < 1.2; P/C < 0.3; S/C < 0.8.
+      valid_hetero <- has_carbon &
+        is.finite(hetero_ratios[, "NtoC"]) &
+        is.finite(hetero_ratios[, "OtoC"]) &
+        is.finite(hetero_ratios[, "PtoC"]) &
+        is.finite(hetero_ratios[, "StoC"]) &
+        hetero_ratios[, "NtoC"] < 1.3 &
+        hetero_ratios[, "OtoC"] < 1.2 &
+        hetero_ratios[, "PtoC"] < 0.3 &
+        hetero_ratios[, "StoC"] < 0.8
+      
+      # Golden Rule #6: element-probability heuristic.
+      valid_element_probability <- !is.na(element_probabilities) & element_probabilities
+      
+      # Require Rdisop's own validity flag as an additional hard filter.
+      valid_rdisop <- !is.na(validities) & tolower(trimws(as.character(validities))) == "valid"
+      
+      # DBE and valence are hard filters; missing/unknown results fail closed.
+      valid_dbe <- !is.na(dbe_values) & is.finite(dbe_values) & dbe_values >= 0
+      valid_valence <- !is.na(valid_valence) & valid_valence
+      
+      valid_indices <- which(
+        valid_rdisop &
+          valid_hc &
+          valid_hetero &
+          valid_element_probability &
+          valid_dbe &
+          valid_valence
       )
-      
-      valid_indices <- which(valid_hc & valid_hetero & valid_dbe & valid_valence)
       
       if (length(valid_indices) > 0) {
         best_index <- valid_indices[which.max(adjusted_scores[valid_indices])]
@@ -1248,8 +1441,8 @@ for (group in unique_groups) {
   )
   
   
-  write.csv(feature_matrix_df_final, file = file.path(data_dir, "feature_matrix_with_molecular_info.csv"), row.names = T)
-  write.csv(molecular_data, file = file.path(data_dir, "molecular_data.csv"), row.names = F)
+  write.csv(feature_matrix_df_final, file = out_file("feature_matrix_with_molecular_info.csv"), row.names = T)
+  write.csv(molecular_data, file = out_file("molecular_data.csv"), row.names = F)
 }
 
 message("RDISOP calculations complete. Export of feature_matrix_with_molecular_info.csv and molecular_data.csv successful")
@@ -1386,7 +1579,7 @@ if (any(list_columns)) {
 }
 
 write.csv(feature_matrix_df_final_annotated,
-          file = file.path(data_dir, "feature_matrix_with_formula_annotations.csv"),
+          file = out_file("feature_matrix_with_formula_annotations.csv"),
           row.names = TRUE)
 
 # =============================
@@ -1657,7 +1850,7 @@ cat("Predicted_Adduct row added at row 3.\n")
 
 
 write.csv(feature_matrix_df_final_annotated,
-          file = file.path(data_dir, "feature_matrix_with_formula_and_mz_annotations.csv"),
+          file = out_file("feature_matrix_with_formula_and_mz_annotations.csv"),
           row.names = TRUE)
 
 # =============================
@@ -1678,7 +1871,7 @@ feature_matrix_df_final_annotated_filtered <- if (length(na_cols) > 0) {
 }
 
 write.csv(feature_matrix_df_final_annotated_filtered,
-          file = file.path(data_dir, "feature_matrix_with_formula_and_mz_annotations_filtered.csv"),
+          file = out_file("feature_matrix_with_formula_and_mz_annotations_filtered.csv"),
           row.names = TRUE)
 
 
@@ -1923,7 +2116,7 @@ rownames(df_clean_out) <- NULL
 
 write.csv(
   df_clean_out,
-  file = file.path(data_dir, "feature_matrix_metabo.csv"),
+  file = out_file("feature_matrix_metabo.csv"),
   row.names = FALSE
 )
 
@@ -1965,9 +2158,21 @@ rownames(df_final_out) <- NULL
 
 write.csv(
   df_final_out,
-  file = file.path(data_dir, "feature_matrix_transposed_with_metadata.csv"),
+  file = out_file("feature_matrix_transposed_with_metadata.csv"),
   row.names = FALSE
 )
 
 cat("Transposed file exported with annotated metabolite names\n")
 message("Annotation feature matrices saved. Processing and annotation completed.")
+
+# =============================
+# REPRODUCIBILITY: close run_parameters.yml
+# =============================
+update_run_parameters(list(
+  run_status       = "completed",
+  run_finished     = format(Sys.time(), "%Y-%m-%d %H:%M:%S %z"),
+  run_duration_min = round(as.numeric(difftime(Sys.time(), run_started_time, units = "mins")), 1),
+  output_files     = as.list(sort(list.files(output_dir, recursive = TRUE))),
+  session_info     = get_session_info()
+))
+message("Run parameters saved: ", file.path(output_dir, "run_parameters.yml"))
