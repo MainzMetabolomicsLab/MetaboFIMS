@@ -1282,6 +1282,9 @@ server <- function(input, output, session) {
     cfg$output_subdirs  <- as.list(subdirs)         # named list of subfolders inside output_dir
     cfg$mzml_export_dir <- input$data_dir           # exported mzML spectra go directly into the processing folder
     cfg$pipeline_script_path <- input$script_path   # recorded (with md5) in run_parameters.yml
+    # versions from the file headers, recorded in run_parameters.yml
+    cfg$pipeline_version <- fmt_version(read_script_version(input$script_path, VERSION_RX$pipeline))
+    cfg$app_version      <- fmt_version(read_script_version(find_local_app(), VERSION_RX$app))
     append_log(paste0("Output folder: ", out_dir))
     append_log("Starting pipeline with direct config injection")
     rv$progress <- 0
