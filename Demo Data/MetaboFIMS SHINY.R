@@ -301,6 +301,23 @@ gh_tree <- function() {
   jsonlite::fromJSON(api)$tree
 }
 
+# Exact content of a file version on GitHub, fetched by its git blob SHA through the API.
+# Unlike raw.githubusercontent.com this is never served from a stale cache right after an upload.
+gh_blob_bytes <- function(sha) {
+  api <- sprintf("https://api.github.com/repos/%s/%s/git/blobs/%s", GH_OWNER, GH_REPO, sha)
+  b <- jsonlite::fromJSON(api)
+  if (!identical(b$encoding, "base64")) stop("unexpected blob encoding from GitHub", call. = FALSE)
+  jsonlite::base64_dec(gsub("[\r\n]", "", b$content))
+}
+# Writes the GitHub file with this SHA to `dest`: via the blob API, falling back to the raw URL.
+# Returns TRUE only if the written file really has that SHA.
+fetch_online_file <- function(sha, url, dest) {
+  ok <- tryCatch({ writeBin(gh_blob_bytes(sha), dest); TRUE }, error = function(e) FALSE)
+  if (!ok || !(sha %in% local_script_shas(dest)))
+    ok <- tryCatch({ utils::download.file(url, dest, mode = "wb", quiet = TRUE); TRUE }, error = function(e) FALSE)
+  ok && file.exists(dest) && sha %in% local_script_shas(dest)
+}
+
 # Pipeline script ("Demo Data/MetaboFIMS.R") or Shiny app ("Demo Data/MetaboFIMS SHINY.R") on GitHub;
 # without the exact name the highest matching name wins. Also reads the version from its header.
 find_online_script <- function(kind = "pipeline", tree = gh_tree()) {
@@ -314,12 +331,10 @@ find_online_script <- function(kind = "pipeline", tree = gh_tree()) {
   b    <- if (any(exact)) b[which(exact)[1], , drop = FALSE] else b[order(basename(b$path), decreasing = TRUE)[1], , drop = FALSE]
   enc  <- paste(vapply(strsplit(b$path, "/", fixed = TRUE)[[1]], utils::URLencode, "", reserved = TRUE), collapse = "/")
   url  <- sprintf("https://raw.githubusercontent.com/%s/%s/%s/%s", GH_OWNER, GH_REPO, GH_BRANCH, enc)
-  # Online version: read from the raw file, but only trusted if that file matches the hash of the API
-  # (right after a push, raw.githubusercontent.com may still serve the previous file for a few minutes)
+  # Online version: read from exactly the file version with this SHA
   version <- NA_character_
   tmp <- tempfile(fileext = ".R"); on.exit(unlink(tmp), add = TRUE)
-  ok <- tryCatch({ utils::download.file(url, tmp, mode = "wb", quiet = TRUE); TRUE }, error = function(e) FALSE)
-  if (ok && b$sha %in% local_script_shas(tmp)) version <- read_script_version(tmp, VERSION_RX[[kind]])
+  if (fetch_online_file(b$sha, url, tmp)) version <- read_script_version(tmp, VERSION_RX[[kind]])
   list(path = b$path, name = basename(b$path), sha = b$sha, url = url, version = version)
 }
 
@@ -830,8 +845,7 @@ server <- function(input, output, session) {
   # Downloads one component, checks its hash and replaces the local file. Returns the new path.
   replace_with_online <- function(r) {
     tmp <- tempfile(fileext = ".R"); on.exit(unlink(tmp), add = TRUE)
-    utils::download.file(r$url, tmp, mode = "wb", quiet = TRUE)
-    if (!(r$sha %in% local_script_shas(tmp))) stop("downloaded file does not match the GitHub hash", call. = FALSE)
+    if (!fetch_online_file(r$sha, r$url, tmp)) stop("could not download the GitHub version (or its hash did not match)", call. = FALSE)
     dest <- file.path(dirname(r$local), r$name)
     if (!file.copy(tmp, dest, overwrite = TRUE)) stop("could not write ", dest, call. = FALSE)
     if (norm_path(dest) != norm_path(r$local)) unlink(r$local)   # old file replaced by the new one
@@ -880,7 +894,7 @@ server <- function(input, output, session) {
         p("The new app version (", tags$code(fmt_version(st$app$version)), ") has been saved. ",
           "It takes effect after a restart."),
         p("'Restart now' restarts the R session in RStudio and starts the new app automatically. ",
-          "This browser tab is then no longer connected - the new app opens in a new one."),
+          "This window is then no longer connected - the new app opens like with 'Run App' in RStudio."),
         footer = tagList(
           actionButton("restart_later", "Later"),
           actionButton("restart_app", "Restart now", class = "btn-primary")
@@ -915,8 +929,12 @@ server <- function(input, output, session) {
                        type = "warning", duration = NULL)
       return()
     }
-    cmd <- sprintf("setwd(%s); shiny::runApp(%s, launch.browser = TRUE)",
-                   deparse(APP_DIR), deparse(norm_path(app_file)))
+    # After the restart only setwd() runs as restart command, so RStudio can finish "Restoring R session".
+    # runApp() is then sent to the console like typed code and opens where RStudio's "Run App" setting says
+    # (no launch.browser here, so RStudio's own viewer setting - e.g. "Run in Window" - is used).
+    run_cmd <- sprintf("shiny::runApp(%s)", deparse(norm_path(app_file)))
+    cmd <- sprintf("setwd(%s); rstudioapi::sendToConsole(%s, execute = TRUE, focus = FALSE)",
+                   deparse(APP_DIR), deparse(run_cmd))
     append_log(paste("Restarting R session with the new app:", basename(app_file)))
     rstudioapi::restartSession(command = cmd)
     stopApp()
