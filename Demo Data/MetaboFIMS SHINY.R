@@ -807,6 +807,7 @@ server <- function(input, output, session) {
       return()
     }
     st <- online_state()
+    new_app <- NULL
     for (k in sel) {
       r <- info[[k]]
       dest <- tryCatch(replace_with_online(r), error = function(e) e)
@@ -820,15 +821,62 @@ server <- function(input, output, session) {
         saved <- read_saved_paths()
         if (length(saved)) { saved$script_path <- dest; save_saved_paths(saved) }
       }
+      if (k == "app") new_app <- dest
       st[[k]] <- list(version = r$version, status = "up to date")
       append_log(paste0(COMPONENT_LABELS[[k]], " updated from GitHub: ", basename(r$local), " (", fmt_version(r$local_version),
                         ") -> ", r$name, " (", fmt_version(r$version), ")"))
-      showNotification(paste0(COMPONENT_LABELS[[k]], " updated to ", r$name, " (", fmt_version(r$version), ")",
-                              if (k == "app") " - please restart the app." else ""),
-                       type = "message", duration = if (k == "app") NULL else 5)
+      if (k != "app") showNotification(paste0(COMPONENT_LABELS[[k]], " updated to ", r$name, " (", fmt_version(r$version), ")"),
+                                       type = "message")
     }
     online_state(st)
     update_info(NULL)
+    if (!is.null(new_app)) {
+      new_app_path(new_app)
+      showModal(modalDialog(
+        title = "Shiny app updated",
+        p("The new app version (", tags$code(fmt_version(st$app$version)), ") has been saved. ",
+          "It takes effect after a restart."),
+        p("'Restart now' restarts the R session in RStudio and starts the new app automatically. ",
+          "This browser tab is then no longer connected - the new app opens in a new one."),
+        footer = tagList(
+          actionButton("restart_later", "Later"),
+          actionButton("restart_app", "Restart now", class = "btn-primary")
+        ),
+        easyClose = FALSE
+      ))
+    }
+  })
+  
+  # ---- Restart after an app update (RStudio: restart the R session, then run the new app) ----
+  new_app_path <- reactiveVal(NULL)
+  
+  observeEvent(input$restart_later, {
+    removeModal()
+    append_log("App restart postponed - the new app version is used after the next start.")
+    showNotification("The new app version is used after the next start.", type = "message")
+  })
+  
+  observeEvent(input$restart_app, {
+    removeModal()
+    app_file <- new_app_path()
+    req(app_file)
+    if (rv$running) {
+      showNotification("A pipeline run is in progress - restart after it has finished.", type = "warning")
+      return()
+    }
+    can_restart <- requireNamespace("rstudioapi", quietly = TRUE) && rstudioapi::isAvailable() &&
+      "command" %in% names(formals(rstudioapi::restartSession))
+    if (!can_restart) {
+      append_log("Automatic restart not available (needs RStudio and a recent 'rstudioapi') - please restart manually.")
+      showNotification("Automatic restart needs RStudio - please stop the app and start it again.",
+                       type = "warning", duration = NULL)
+      return()
+    }
+    cmd <- sprintf("setwd(%s); shiny::runApp(%s, launch.browser = TRUE)",
+                   deparse(APP_DIR), deparse(norm_path(app_file)))
+    append_log(paste("Restarting R session with the new app:", basename(app_file)))
+    rstudioapi::restartSession(command = cmd)
+    stopApp()
   })
   
   # ---- HMDB biospecimen / origin options, read from the selected CSV ----
