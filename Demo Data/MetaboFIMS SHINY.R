@@ -1,4 +1,4 @@
-# MetaboFIMS SHINY version: 1.2.0
+# MetaboFIMS SHINY version: 1.2.1
 # MetaboFIMS SHINY application with first-start setup wizard.
 # Start this app from the folder that should contain your data (the "working folder").
 # On first start (or whenever paths.yml is missing / invalid / from another OS) a wizard asks to either
@@ -176,8 +176,13 @@ find_hmdb_csv <- function() {
 
 # Downloads everything below "Demo Data/" of the GitHub repo into `dest` (folder structure kept,
 # the "Demo Data" prefix is dropped). Uses ONE API call for the file list, then raw downloads.
-# Already complete files are skipped, so an interrupted download can simply be restarted.
-download_demo_data <- function(dest, progress = function(i, n, f) NULL) {
+#   mode = "missing":   only files that do not exist locally yet; existing files are kept as they are
+#   mode = "overwrite": every demo file is downloaded and replaces an existing file of the same name
+# Nothing else is deleted. Each file is downloaded to a temporary file first and only then moved into
+# place, so an interrupted download never leaves a half-written file behind.
+# Returns the relative paths of all demo files; attribute "kept" = files that were left untouched.
+download_demo_data <- function(dest, progress = function(i, n, f) NULL, mode = c("missing", "overwrite")) {
+  mode <- match.arg(mode)
   old <- options(timeout = max(3600, getOption("timeout"))); on.exit(options(old), add = TRUE)
   api <- sprintf("https://api.github.com/repos/%s/%s/git/trees/%s?recursive=1", GH_OWNER, GH_REPO, GH_BRANCH)
   res <- tryCatch(jsonlite::fromJSON(api),
@@ -203,28 +208,36 @@ download_demo_data <- function(dest, progress = function(i, n, f) NULL) {
   rel     <- substring(blobs$path, nchar(prefix) + 1)
   targets <- file.path(dest, rel)
   n <- length(rel)
+  kept <- character(0)
   for (i in seq_len(n)) {
     progress(i, n, rel[i])
     dir.create(dirname(targets[i]), recursive = TRUE, showWarnings = FALSE)
-    if (file.exists(targets[i]) && isTRUE(file.size(targets[i]) == blobs$size[i])) next
-    utils::download.file(raw_url(blobs$path[i]), targets[i], mode = "wb", quiet = TRUE)
-    if (is_lfs_pointer(targets[i])) {   # repo stores this file with Git LFS
-      utils::download.file(media_url(blobs$path[i]), targets[i], mode = "wb", quiet = TRUE)
-    }
+    if (mode == "missing" && file.exists(targets[i])) { kept <- c(kept, rel[i]); next }
+    tmp <- tempfile(tmpdir = dirname(targets[i]), fileext = ".part")
+    ok <- tryCatch({
+      utils::download.file(raw_url(blobs$path[i]), tmp, mode = "wb", quiet = TRUE)
+      if (is_lfs_pointer(tmp)) {   # repo stores this file with Git LFS
+        utils::download.file(media_url(blobs$path[i]), tmp, mode = "wb", quiet = TRUE)
+      }
+      TRUE
+    }, error = function(e) { unlink(tmp); stop("Download of '", rel[i], "' failed: ", conditionMessage(e), call. = FALSE) })
+    if (!file.copy(tmp, targets[i], overwrite = TRUE)) { unlink(tmp); stop("Could not write ", targets[i], call. = FALSE) }
+    unlink(tmp)
   }
-  rel
+  structure(rel, kept = kept)
 }
 
 # Works out the four app paths from the files that were just downloaded.
 
 # Works out the four app paths from the files that were just downloaded.
-resolve_demo_paths <- function(dest, rel_files) {
+resolve_demo_paths <- function(dest, rel_files, mode = "missing") {
   # HMDB CSV: must end up directly in the working folder
   hm <- rel_files[grepl("^hmdb.*\\.csv$", basename(rel_files), ignore.case = TRUE)]
   file_path <- ""
   if (length(hm)) {
     top <- file.path(dest, basename(hm[1]))
-    if (!file.exists(top)) file.copy(file.path(dest, hm[1]), top)
+    src <- file.path(dest, hm[1])
+    if (norm_path(src) != norm_path(top) && (mode == "overwrite" || !file.exists(top))) file.copy(src, top, overwrite = TRUE)
     file_path <- top
   }
   
@@ -278,7 +291,19 @@ VERSION_RX <- list(
   pipeline = c("^#+\\s*MetaboFIMS version:\\s*([0-9]+(\\.[0-9]+)*)", "^#\\s*V([0-9]+(\\.[0-9]+)*)"),
   app      = c("^#+\\s*MetaboFIMS SHINY version:\\s*([0-9]+(\\.[0-9]+)*)")
 )
-COMPONENT_LABELS <- c(pipeline = "Pipeline script", app = "Shiny app")
+COMPONENT_LABELS <- c(pipeline = "Pipeline script", app = "Shiny app", hmdb = "HMDB annotation")
+
+# HMDB CSV: version stored as a column name in the header line, e.g. "# Annotation version: 1.2.0"
+HMDB_VERSION_RX <- "#+\\s*Annotation version:\\s*([0-9]+(\\.[0-9]+)*)"
+version_from_header_line <- function(line) {
+  line <- sub("^\ufeff", "", .s(line))
+  m <- regmatches(line, regexec(HMDB_VERSION_RX, line, ignore.case = TRUE))[[1]]
+  if (length(m) >= 2) m[2] else NA_character_
+}
+read_hmdb_version <- function(path) {
+  if (!is_file(path)) return(NA_character_)
+  version_from_header_line(tryCatch(readLines(path, n = 1, warn = FALSE, encoding = "UTF-8"), error = function(e) ""))
+}
 
 # Version from the file header. Returns NA if no version line is found in the first 30 lines.
 read_script_version <- function(path, rx = VERSION_RX$pipeline) {
@@ -294,6 +319,9 @@ read_script_version <- function(path, rx = VERSION_RX$pipeline) {
   NA_character_
 }
 fmt_version <- function(v) if (is.null(v) || length(v) != 1L || is.na(v)) "unknown" else v
+local_version <- function(kind, path) {
+  if (kind == "hmdb") read_hmdb_version(path) else read_script_version(path, VERSION_RX[[kind]])
+}
 
 # File list of the GitHub repo (one API call, shared by all components of one check)
 gh_tree <- function() {
@@ -336,6 +364,58 @@ find_online_script <- function(kind = "pipeline", tree = gh_tree()) {
   tmp <- tempfile(fileext = ".R"); on.exit(unlink(tmp), add = TRUE)
   if (fetch_online_file(b$sha, url, tmp)) version <- read_script_version(tmp, VERSION_RX[[kind]])
   list(path = b$path, name = basename(b$path), sha = b$sha, url = url, version = version)
+}
+
+# HMDB CSV in "Demo Data" on GitHub. Its version is read from the first line only (no full download).
+# First source: the contents API with the raw media type (always the current file, no stale CDN cache
+# right after an upload); fallback: raw.githubusercontent.com. If the repo stores the CSV with Git LFS,
+# both only serve a pointer -> the LFS media URL is used. `diag` records what was read (for the log).
+find_online_hmdb <- function(tree) {
+  hit <- tree$type == "blob" & startsWith(tree$path, paste0(GH_DEMO, "/")) &
+    grepl("^hmdb.*\\.csv$", basename(tree$path), ignore.case = TRUE)
+  b <- tree[hit, , drop = FALSE]
+  if (!nrow(b)) stop("No HMDB CSV found in '", GH_DEMO, "' of the GitHub repository.", call. = FALSE)
+  b <- b[order(nchar(b$path))[1], , drop = FALSE]   # prefer the file at the top of "Demo Data"
+  enc <- paste(vapply(strsplit(b$path, "/", fixed = TRUE)[[1]], utils::URLencode, "", reserved = TRUE), collapse = "/")
+  api   <- sprintf("https://api.github.com/repos/%s/%s/contents/%s?ref=%s", GH_OWNER, GH_REPO, enc, GH_BRANCH)
+  raw   <- sprintf("https://raw.githubusercontent.com/%s/%s/%s/%s", GH_OWNER, GH_REPO, GH_BRANCH, enc)
+  media <- sprintf("https://media.githubusercontent.com/media/%s/%s/%s/%s", GH_OWNER, GH_REPO, GH_BRANCH, enc)
+  first_line <- function(u, headers = NULL) {
+    con <- if (is.null(headers)) url(u, open = "rb") else url(u, open = "rb", headers = headers)
+    on.exit(close(con), add = TRUE)
+    l <- readLines(con, n = 1, warn = FALSE, encoding = "UTF-8")
+    if (!length(l)) "" else l
+  }
+  diag <- character(0)
+  try_src <- function(label, u, headers = NULL) {
+    l <- tryCatch(first_line(u, headers), error = function(e) { diag <<- c(diag, paste0(label, ": ", conditionMessage(e))); NA })
+    if (!is.na(l)) diag <<- c(diag, paste0(label, ": '", substr(l, 1, 120), if (nchar(l) > 120) "...'" else "'"))
+    l
+  }
+  l <- try_src("API", api, c(Accept = "application/vnd.github.raw"))
+  if (is.na(l)) l <- try_src("raw", raw)
+  src <- raw
+  if (!is.na(l) && startsWith(l, "version https://git-lfs")) {   # LFS pointer -> real file
+    l <- try_src("LFS", media); src <- media
+  }
+  list(path = b$path, name = basename(b$path), sha = b$sha, url = src,
+       version = version_from_header_line(if (is.na(l)) "" else l),
+       diag = paste(diag, collapse = " | "))
+}
+
+# HMDB is compared by version number only (a Git LFS hash would never match the file content)
+assess_hmdb <- function(local_path, tree) {
+  res <- list(kind = "hmdb", local = local_path, local_version = read_hmdb_version(local_path), version = NA_character_)
+  if (!is_file(local_path)) return(c(res, list(state = "no local file")))
+  on <- tryCatch(find_online_hmdb(tree), error = function(e) e)
+  if (inherits(on, "error")) return(c(res, list(state = "check failed", error = conditionMessage(on))))
+  res[names(on)] <- on
+  if (is.na(on$version)) return(c(res, list(state = "GitHub version unknown",
+                                            error = paste0("no 'Annotation version' in the first line of ", on$path,
+                                                           " on GitHub - read: ", on$diag))))
+  if (is.na(res$local_version)) return(c(res, list(state = "update available")))
+  cmp <- utils::compareVersion(on$version, res$local_version)
+  c(res, list(state = if (cmp == 1) "update available" else if (cmp == 0) "up to date" else "local version is newer"))
 }
 
 # Compares one local file with its GitHub counterpart. state: "up to date", "update available",
@@ -401,12 +481,20 @@ setup_modal <- function(msg = NULL) {
     radioButtons(
       "setup_mode", "How do you want to set them up?",
       choices = c("Set the paths manually (built-in file browser)" = "manual",
-                  "Download the Demo Data from GitHub into the working folder" = "download"),
+                  "Download only what is missing from the Demo Data (keep existing files)" = "download_missing",
+                  "Download all Demo Data again (overwrite existing files)" = "download_all"),
       selected = "manual"
     ),
-    helpText("Download: all files of 'Demo Data' are copied into the working folder, hmdb.csv is placed directly in it, ",
-             "and the folders are filled in automatically. The pipeline R script is searched next to the app; ",
-             "if it is not found you will be asked to select it."),
+    conditionalPanel("input.setup_mode == 'download_missing'", helpText(
+      "Only files of 'Demo Data' that do not exist in the working folder yet are downloaded. Existing files ",
+      "(e.g. your MetaboFIMS.R or HMDB CSV) are kept unchanged - if they are older or edited versions, they may ",
+      "not match the rest. Afterwards the versions are compared with GitHub and updates are offered.")),
+    conditionalPanel("input.setup_mode == 'download_all'", tags$p(style = "color:#b71c1c;",
+                                                                  "All files of 'Demo Data' are downloaded again and REPLACE existing files with the same name in the working ",
+                                                                  "folder - including your own changes to MetaboFIMS.R, the HMDB CSV or the demo raw files. ",
+                                                                  "Other files and folders (your own data, previous outputs, the app, paths.yml) are not touched.")),
+    helpText("Download: the HMDB CSV is placed directly in the working folder and the folders are filled in automatically. ",
+             "The pipeline R script is searched next to the app; if it is not found you will be asked to select it."),
     footer = tagList(
       actionButton("setup_skip", "Later"),
       actionButton("setup_go", "Continue", class = "btn-primary")
@@ -678,14 +766,19 @@ server <- function(input, output, session) {
       return()
     }
     
-    append_log(paste0("Setup: downloading Demo Data from GitHub into ", APP_DIR))
+    dl_mode <- if (identical(input$setup_mode, "download_all")) "overwrite" else "missing"
+    append_log(paste0("Setup: downloading Demo Data from GitHub into ", APP_DIR,
+                      if (dl_mode == "overwrite") " (overwrite existing files)" else " (only missing files)"))
+    kept <- character(0)
     res <- tryCatch({
       rel <- withProgress(message = "Downloading Demo Data from GitHub", value = 0, {
-        download_demo_data(APP_DIR, progress = function(i, n, f) {
-          setProgress(value = (i - 1) / n, detail = sprintf("%d/%d  %s", i, n, f))
+        download_demo_data(APP_DIR, mode = dl_mode, progress = function(i, n, f) {
+          # shiny:: explicitly: R.utils (attached e.g. after running the pipeline in the same session) masks setProgress()
+          shiny::setProgress(value = (i - 1) / n, detail = sprintf("%d/%d  %s", i, n, f))
         })
       })
-      resolve_demo_paths(APP_DIR, rel)
+      kept <- attr(rel, "kept")
+      resolve_demo_paths(APP_DIR, rel, mode = dl_mode)
     }, error = function(e) e)
     
     if (inherits(res, "error")) {
@@ -701,6 +794,11 @@ server <- function(input, output, session) {
     if (nzchar(res$file_path))          updateTextInput(session, "file_path", value = res$file_path)
     append_log(paste0("Demo data ready. data_dir=", res$data_dir, " | raw=", res$data_dir_raw_files,
                       " | HMDB=", res$file_path))
+    if (length(kept)) {
+      append_log(paste0("Setup: ", length(kept), " existing file(s) kept unchanged: ", paste(kept, collapse = ", ")))
+      # existing files may be older versions -> compare pipeline / HMDB with GitHub and offer updates
+      check_for_updates(manual = TRUE, script = script, hmdb = res$file_path)
+    }
     
     p <- list(script_path = script, data_dir = res$data_dir,
               data_dir_raw_files = res$data_dir_raw_files, file_path = res$file_path)
@@ -749,30 +847,37 @@ server <- function(input, output, session) {
   # ======================= Update check (pipeline script vs. GitHub) =======================
   update_info  <- reactiveVal(NULL)
   online_state <- reactiveVal(list())   # per component: list(version, status) of the last check
+  hmdb_refresh <- reactiveVal(0)        # bumped after an HMDB update, so its options/version are re-read
   dialog_auto  <- reactiveVal(FALSE)    # TRUE while the dialog of the automatic start check is open
   
   output$version_status <- renderUI({
     st <- online_state()
+    hmdb_refresh()
     line <- function(kind, local_path) {
       s <- st[[kind]]
-      tags$div(COMPONENT_LABELS[[kind]], " - local: ", tags$code(fmt_version(read_script_version(local_path, VERSION_RX[[kind]]))),
+      tags$div(COMPONENT_LABELS[[kind]], " - local: ", tags$code(fmt_version(local_version(kind, local_path))),
                " | GitHub: ", tags$code(if (is.null(s)) "not checked" else fmt_version(s$version)),
                if (!is.null(s)) paste0(" (", s$status, ")"))
     }
-    helpText(line("pipeline", input$script_path), line("app", find_local_app()))
+    helpText(line("pipeline", input$script_path), line("app", find_local_app()), line("hmdb", input$file_path))
   })
   
-  check_for_updates <- function(manual = FALSE) {
+  # script / hmdb: paths to check (default: the current inputs; the setup passes the just-downloaded paths)
+  check_for_updates <- function(manual = FALSE, script = NULL, hmdb = NULL) {
+    script <- script %||% isolate(.s(input$script_path))
+    hmdb   <- hmdb %||% isolate(.s(input$file_path))
     tree <- tryCatch(gh_tree(), error = function(e) e)
     if (inherits(tree, "error")) {
       online_state(list(pipeline = list(version = NA_character_, status = "check failed"),
-                        app      = list(version = NA_character_, status = "check failed")))
+                        app      = list(version = NA_character_, status = "check failed"),
+                        hmdb     = list(version = NA_character_, status = "check failed")))
       append_log(paste("Update check skipped (offline or GitHub not reachable):", conditionMessage(tree)))
       if (manual) showNotification(paste("Update check failed:", conditionMessage(tree)), type = "error", session = session)
       return(invisible(NULL))
     }
-    res <- list(pipeline = assess_update("pipeline", isolate(.s(input$script_path)), tree),
-                app      = assess_update("app", find_local_app(), tree))
+    res <- list(pipeline = assess_update("pipeline", script, tree),
+                app      = assess_update("app", find_local_app(), tree),
+                hmdb     = assess_hmdb(hmdb, tree))
     online_state(lapply(res, function(r) list(version = r$version, status = r$state)))
     for (r in res) append_log(paste0("Update check - ", COMPONENT_LABELS[[r$kind]], ": ", r$state,
                                      " (local ", fmt_version(r$local_version), ", GitHub ", fmt_version(r$version), ")",
@@ -801,6 +906,7 @@ server <- function(input, output, session) {
                          choiceValues = names(todo),
                          selected     = names(todo)[vapply(todo, function(r) r$state == "update available", TRUE)]),
       if ("app" %in% names(todo)) helpText("A Shiny app update takes effect after restarting the app."),
+      if ("hmdb" %in% names(todo)) helpText("The HMDB CSV keeps its local file name; only its content is replaced."),
       if (!manual) tagList(
         hr(),
         checkboxInput("disable_auto", "Don't check for updates automatically at start anymore", value = FALSE),
@@ -844,6 +950,16 @@ server <- function(input, output, session) {
   
   # Downloads one component, checks its hash and replaces the local file. Returns the new path.
   replace_with_online <- function(r) {
+    if (r$kind == "hmdb") {   # large file, checked by version line; local file name is kept
+      old <- options(timeout = max(3600, getOption("timeout"))); on.exit(options(old), add = TRUE)
+      tmp <- tempfile(fileext = ".csv"); on.exit(unlink(tmp), add = TRUE)
+      utils::download.file(r$url, tmp, mode = "wb", quiet = TRUE)
+      got <- read_hmdb_version(tmp)
+      if (!identical(got, r$version)) stop("downloaded HMDB CSV has version ", fmt_version(got),
+                                           " instead of ", fmt_version(r$version), call. = FALSE)
+      if (!file.copy(tmp, r$local, overwrite = TRUE)) stop("could not write ", r$local, call. = FALSE)
+      return(norm_path(r$local))
+    }
     tmp <- tempfile(fileext = ".R"); on.exit(unlink(tmp), add = TRUE)
     if (!fetch_online_file(r$sha, r$url, tmp)) stop("could not download the GitHub version (or its hash did not match)", call. = FALSE)
     dest <- file.path(dirname(r$local), r$name)
@@ -879,6 +995,7 @@ server <- function(input, output, session) {
         if (length(saved)) { saved$script_path <- dest; save_saved_paths(saved) }
       }
       if (k == "app") new_app <- dest
+      if (k == "hmdb") hmdb_refresh(hmdb_refresh() + 1)
       st[[k]] <- list(version = r$version, status = "up to date")
       append_log(paste0(COMPONENT_LABELS[[k]], " updated from GitHub: ", basename(r$local), " (", fmt_version(r$local_version),
                         ") -> ", r$name, " (", fmt_version(r$version), ")"))
@@ -941,7 +1058,7 @@ server <- function(input, output, session) {
   })
   
   # ---- HMDB biospecimen / origin options, read from the selected CSV ----
-  hmdb_levels_available <- debounce(reactive(read_hmdb_levels(input$file_path)), 500)
+  hmdb_levels_available <- debounce(reactive({ hmdb_refresh(); read_hmdb_levels(input$file_path) }), 500)
   
   # Selection waiting to be applied (e.g. from a loaded config) once the choices exist
   hmdb_pending <- reactiveValues(biospecimen = NULL, origin = NULL)
@@ -1285,6 +1402,7 @@ server <- function(input, output, session) {
     # versions from the file headers, recorded in run_parameters.yml
     cfg$pipeline_version <- fmt_version(read_script_version(input$script_path, VERSION_RX$pipeline))
     cfg$app_version      <- fmt_version(read_script_version(find_local_app(), VERSION_RX$app))
+    cfg$hmdb_version     <- fmt_version(read_hmdb_version(input$file_path))
     append_log(paste0("Output folder: ", out_dir))
     append_log("Starting pipeline with direct config injection")
     rv$progress <- 0

@@ -1,4 +1,4 @@
-# MetaboFIMS version: 1.2.1
+# MetaboFIMS version: 1.2.2
 {
   library(MSnbase)
   library(Rdisop)  
@@ -105,6 +105,7 @@
                            mzml_export_dir    = mzml_export_dir),
     hmdb            = list(csv         = get_var("file_path"),
                            md5         = md5_of(get_var("file_path", "")),
+                           version     = get_var("hmdb_version", "unknown (not started from the app)"),
                            biospecimen = list_or_note(get_var("hmdb_biospecimen", NULL)),
                            origin      = list_or_note(get_var("hmdb_origin", NULL))),
     settings        = run_settings,
