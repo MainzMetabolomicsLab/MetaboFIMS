@@ -168,10 +168,21 @@ find_local_app <- function() {
   if (length(f)) sort(f, decreasing = TRUE)[1] else ""
 }
 
-# HMDB csv sitting directly in the working folder
+# HMDB csv sitting directly in the working folder. Only "HMDB.csv" (any case) counts - other HMDB_*.csv
+# files (e.g. the old HMDB_BLOOD_ENDO_FOOD_DRUG_DRUGMET.csv) are ignored.
+HMDB_FILE_RX <- "^hmdb\\.csv$"
 find_hmdb_csv <- function() {
-  f <- list.files(APP_DIR, pattern = "^hmdb.*\\.csv$", full.names = TRUE, ignore.case = TRUE)
+  f <- list.files(APP_DIR, pattern = HMDB_FILE_RX, full.names = TRUE, ignore.case = TRUE)
   if (length(f)) f[1] else ""
+}
+
+# Does `rel` exist below `dest`? Case-insensitive, so "HMDB.CSV" counts as "HMDB.csv" also on Linux.
+exists_ci <- function(dest, rel) {
+  vapply(rel, function(r) {
+    if (file.exists(file.path(dest, r))) return(TRUE)
+    d <- file.path(dest, dirname(r))
+    dir.exists(d) && tolower(basename(r)) %in% tolower(list.files(d, all.files = TRUE))
+  }, logical(1), USE.NAMES = FALSE)
 }
 
 # Downloads everything below "Demo Data/" of the GitHub repo into `dest` (folder structure kept,
@@ -212,7 +223,7 @@ download_demo_data <- function(dest, progress = function(i, n, f) NULL, mode = c
   for (i in seq_len(n)) {
     progress(i, n, rel[i])
     dir.create(dirname(targets[i]), recursive = TRUE, showWarnings = FALSE)
-    if (mode == "missing" && file.exists(targets[i])) { kept <- c(kept, rel[i]); next }
+    if (mode == "missing" && exists_ci(dest, rel[i])) { kept <- c(kept, rel[i]); next }
     tmp <- tempfile(tmpdir = dirname(targets[i]), fileext = ".part")
     ok <- tryCatch({
       utils::download.file(raw_url(blobs$path[i]), tmp, mode = "wb", quiet = TRUE)
@@ -232,7 +243,7 @@ download_demo_data <- function(dest, progress = function(i, n, f) NULL, mode = c
 # Works out the four app paths from the files that were just downloaded.
 resolve_demo_paths <- function(dest, rel_files, mode = "missing") {
   # HMDB CSV: must end up directly in the working folder
-  hm <- rel_files[grepl("^hmdb.*\\.csv$", basename(rel_files), ignore.case = TRUE)]
+  hm <- rel_files[grepl(HMDB_FILE_RX, basename(rel_files), ignore.case = TRUE)]
   file_path <- ""
   if (length(hm)) {
     top <- file.path(dest, basename(hm[1]))
@@ -372,7 +383,7 @@ find_online_script <- function(kind = "pipeline", tree = gh_tree()) {
 # both only serve a pointer -> the LFS media URL is used. `diag` records what was read (for the log).
 find_online_hmdb <- function(tree) {
   hit <- tree$type == "blob" & startsWith(tree$path, paste0(GH_DEMO, "/")) &
-    grepl("^hmdb.*\\.csv$", basename(tree$path), ignore.case = TRUE)
+    grepl(HMDB_FILE_RX, basename(tree$path), ignore.case = TRUE)
   b <- tree[hit, , drop = FALSE]
   if (!nrow(b)) stop("No HMDB CSV found in '", GH_DEMO, "' of the GitHub repository.", call. = FALSE)
   b <- b[order(nchar(b$path))[1], , drop = FALSE]   # prefer the file at the top of "Demo Data"
@@ -395,27 +406,50 @@ find_online_hmdb <- function(tree) {
   l <- try_src("API", api, c(Accept = "application/vnd.github.raw"))
   if (is.na(l)) l <- try_src("raw", raw)
   src <- raw
+  lfs_oid <- NA_character_
   if (!is.na(l) && startsWith(l, "version https://git-lfs")) {   # LFS pointer -> real file
+    # the pointer holds the SHA-256 of the real file ("oid sha256:..."), used for the hash comparison
+    ptr <- tryCatch({
+      con <- url(api, open = "rb", headers = c(Accept = "application/vnd.github.raw")); on.exit(close(con), add = TRUE)
+      readLines(con, n = 5, warn = FALSE)
+    }, error = function(e) character(0))
+    oid <- sub("^oid sha256:", "", grep("^oid sha256:", ptr, value = TRUE))
+    if (length(oid)) lfs_oid <- tolower(oid[1])
     l <- try_src("LFS", media); src <- media
   }
-  list(path = b$path, name = basename(b$path), sha = b$sha, url = src,
+  list(path = b$path, name = basename(b$path), sha = b$sha, url = src, api_url = api, lfs_oid = lfs_oid,
        version = version_from_header_line(if (is.na(l)) "" else l),
        diag = paste(diag, collapse = " | "))
 }
 
-# HMDB is compared by version number only (a Git LFS hash would never match the file content)
+# Is the local HMDB CSV identical to the one on GitHub? Normal files: git blob SHA-1 (as is, or with
+# CRLF -> LF). Git LFS files: the tree only holds the pointer's SHA, so the SHA-256 from the pointer is used.
+hmdb_identical <- function(local_path, on) {
+  if (!is.na(.s(on$lfs_oid)) && nzchar(.s(on$lfs_oid))) {
+    b  <- readBin(local_path, "raw", file.size(local_path))
+    lf <- b[!(b == as.raw(13L) & c(b[-1L], as.raw(0L)) == as.raw(10L))]   # also accept a CRLF -> LF copy
+    sums <- vapply(list(b, lf), function(x) digest::digest(x, algo = "sha256", serialize = FALSE), "")
+    return(on$lfs_oid %in% tolower(sums))
+  }
+  on$sha %in% local_script_shas(local_path)
+}
+
+# HMDB: hash first (detects any modification), then the version number from the header.
+# Same states as for the scripts; "local file modified" = same version number, different content.
 assess_hmdb <- function(local_path, tree) {
   res <- list(kind = "hmdb", local = local_path, local_version = read_hmdb_version(local_path), version = NA_character_)
   if (!is_file(local_path)) return(c(res, list(state = "no local file")))
   on <- tryCatch(find_online_hmdb(tree), error = function(e) e)
   if (inherits(on, "error")) return(c(res, list(state = "check failed", error = conditionMessage(on))))
   res[names(on)] <- on
+  if (isTRUE(tryCatch(hmdb_identical(local_path, on), error = function(e) FALSE)))
+    return(c(res, list(state = "up to date")))
   if (is.na(on$version)) return(c(res, list(state = "GitHub version unknown",
                                             error = paste0("no 'Annotation version' in the first line of ", on$path,
                                                            " on GitHub - read: ", on$diag))))
-  if (is.na(res$local_version)) return(c(res, list(state = "update available")))
-  cmp <- utils::compareVersion(on$version, res$local_version)
-  c(res, list(state = if (cmp == 1) "update available" else if (cmp == 0) "up to date" else "local version is newer"))
+  cmp <- if (!is.na(res$local_version)) utils::compareVersion(on$version, res$local_version) else NA
+  state <- if (isTRUE(cmp == -1)) "local version is newer" else if (isTRUE(cmp == 0)) "local file modified" else "update available"
+  c(res, list(state = state))
 }
 
 # Compares one local file with its GitHub counterpart. state: "up to date", "update available",
@@ -470,29 +504,94 @@ initial_paths <- list(
 )
 NEEDS_SETUP <- !all(paths_status(initial_paths))
 
+# ---- What already exists in the working folder (used by the setup dialog) ----
+# Local check only (no network): pipeline script, HMDB CSV and folders that contain mzML/mzXML files.
+detect_local_setup <- function() {
+  ms  <- list.files(APP_DIR, pattern = "\\.(mzml|mzxml)$", recursive = TRUE, ignore.case = TRUE)
+  raw <- unique(dirname(ms))
+  list(script = find_pipeline_script(), hmdb = find_hmdb_csv(),
+       raw_dirs = raw[raw != "."], raw_here = any(raw == "."), n_raw = length(ms))
+}
+
+# Demo files on GitHub that do not exist in the working folder yet (NULL if GitHub is not reachable).
+# The Shiny app itself is never part of the demo download.
+missing_demo_files <- function() {
+  tree <- tryCatch(gh_tree(), error = function(e) NULL)
+  if (is.null(tree)) return(NULL)
+  prefix <- paste0(GH_DEMO, "/")
+  p <- tree$path[tree$type == "blob" & startsWith(tree$path, prefix)]
+  p <- p[!is_app_file(basename(p))]
+  rel <- substring(p, nchar(prefix) + 1)
+  rel[!exists_ci(APP_DIR, rel)]
+}
+
+# "processing/raw_mzML/a.mzML", ... -> "processing/raw_mzML/ (12 files)", "HMDB.csv"
+summarise_paths <- function(rel) {
+  grp <- ifelse(grepl("/", rel), paste0(dirname(rel), "/"), rel)
+  n   <- table(grp)
+  out <- ifelse(endsWith(names(n), "/"), paste0(names(n), " (", as.integer(n), if (any(n > 1)) " files)" else " file)"), names(n))
+  out <- sub("\\(1 files\\)", "(1 file)", out)
+  unname(out)
+}
+
 setup_modal <- function(msg = NULL) {
+  loc <- detect_local_setup()
+  found <- c(
+    if (nzchar(loc$script)) paste0("Pipeline script: ", basename(loc$script)),
+    if (nzchar(loc$hmdb))   paste0("HMDB annotation CSV: ", basename(loc$hmdb)),
+    if (length(loc$raw_dirs) || loc$raw_here)
+      paste0("Raw files: ", loc$n_raw, " mzML/mzXML file(s) in ",
+             paste(c(if (loc$raw_here) "the working folder", paste0(loc$raw_dirs, "/")), collapse = ", "))
+  )
+  missing_parts <- c(
+    if (!nzchar(loc$script)) "Pipeline script (MetaboFIMS.R)",
+    if (!nzchar(loc$hmdb))   "HMDB annotation CSV",
+    if (!length(loc$raw_dirs) && !loc$raw_here) "Processing / raw files folders with mzML files"
+  )
+  something_found <- length(found) > 0
+  
+  choices <- c("Set the paths manually (built-in file browser)" = "manual",
+               if (something_found) c("Download only what is missing from the Demo Data (keep existing files)" = "download_missing"),
+               "Download all Demo Data (overwrite existing files)" = "download_all")
+  
+  # What "download only missing" would fetch (one GitHub API call; skipped if nothing was found locally)
+  missing_info <- if (something_found) {
+    miss <- missing_demo_files()
+    if (is.null(miss)) {
+      tags$p(tags$em("The list of files that would be downloaded could not be loaded (offline or GitHub not reachable)."))
+    } else if (!length(miss)) {
+      tags$p("All Demo Data files already exist in the working folder - nothing would be downloaded.")
+    } else {
+      tagList(tags$p(strong("Will be downloaded:")), tags$ul(lapply(summarise_paths(miss), tags$li)))
+    }
+  }
+  
   modalDialog(
     title = "First-start setup",
     p("Detected operating system: ", strong(switch(OS_TYPE, windows = "Windows", macos = "macOS",
                                                    linux = "Linux", "unknown"))),
     p("Working folder (the app was started from here): ", tags$code(APP_DIR)),
     if (!is.null(msg)) tags$p(style = "color:#b71c1c;", msg),
-    p("The R script, the processing folder, the raw files folder and the HMDB CSV are not set yet."),
+    if (something_found) tagList(
+      p(strong("Found in the working folder:")), tags$ul(lapply(found, tags$li)),
+      if (length(missing_parts)) tagList(p(strong("Missing:")), tags$ul(lapply(missing_parts, tags$li)))
+    ) else
+      p("Nothing found in the working folder yet (no pipeline script, HMDB CSV or raw files)."),
     radioButtons(
       "setup_mode", "How do you want to set them up?",
-      choices = c("Set the paths manually (built-in file browser)" = "manual",
-                  "Download only what is missing from the Demo Data (keep existing files)" = "download_missing",
-                  "Download all Demo Data again (overwrite existing files)" = "download_all"),
+      choices = choices,
       selected = "manual"
     ),
-    conditionalPanel("input.setup_mode == 'download_missing'", helpText(
-      "Only files of 'Demo Data' that do not exist in the working folder yet are downloaded. Existing files ",
-      "(e.g. your MetaboFIMS.R or HMDB CSV) are kept unchanged - if they are older or edited versions, they may ",
-      "not match the rest. Afterwards the versions are compared with GitHub and updates are offered.")),
-    conditionalPanel("input.setup_mode == 'download_all'", tags$p(style = "color:#b71c1c;",
-                                                                  "All files of 'Demo Data' are downloaded again and REPLACE existing files with the same name in the working ",
-                                                                  "folder - including your own changes to MetaboFIMS.R, the HMDB CSV or the demo raw files. ",
-                                                                  "Other files and folders (your own data, previous outputs, the app, paths.yml) are not touched.")),
+    conditionalPanel("input.setup_mode == 'download_missing'",
+                     missing_info,
+                     helpText("Existing files are kept unchanged - if they are older or edited versions, they may not match the ",
+                              "rest. Afterwards the versions are compared with GitHub and updates are offered.")),
+    conditionalPanel("input.setup_mode == 'download_all'",
+                     if (something_found) tags$p(style = "color:#b71c1c;",
+                                                 "All files of 'Demo Data' are downloaded and REPLACE existing files with the same name in the working ",
+                                                 "folder - including your own changes to MetaboFIMS.R, the HMDB CSV or the demo raw files. ",
+                                                 "Other files and folders (your own data, previous outputs, the app, paths.yml) are not touched.")
+                     else helpText("All files of 'Demo Data' are downloaded into the working folder.")),
     helpText("Download: the HMDB CSV is placed directly in the working folder and the folders are filled in automatically. ",
              "The pipeline R script is searched next to the app; if it is not found you will be asked to select it."),
     footer = tagList(
@@ -950,13 +1049,20 @@ server <- function(input, output, session) {
   
   # Downloads one component, checks its hash and replaces the local file. Returns the new path.
   replace_with_online <- function(r) {
-    if (r$kind == "hmdb") {   # large file, checked by version line; local file name is kept
+    if (r$kind == "hmdb") {   # large file, checked by version line + hash; local file name is kept
       old <- options(timeout = max(3600, getOption("timeout"))); on.exit(options(old), add = TRUE)
       tmp <- tempfile(fileext = ".csv"); on.exit(unlink(tmp), add = TRUE)
-      utils::download.file(r$url, tmp, mode = "wb", quiet = TRUE)
+      # normal file: contents API (current file, no stale cache); LFS file: media URL (the API only serves the pointer)
+      lfs <- !is.na(.s(r$lfs_oid)) && nzchar(.s(r$lfs_oid))
+      ok <- !lfs && !is.null(r$api_url) && isTRUE(tryCatch({
+        utils::download.file(r$api_url, tmp, mode = "wb", quiet = TRUE, headers = c(Accept = "application/vnd.github.raw"))
+        TRUE
+      }, error = function(e) FALSE))
+      if (!ok) utils::download.file(r$url, tmp, mode = "wb", quiet = TRUE)
       got <- read_hmdb_version(tmp)
       if (!identical(got, r$version)) stop("downloaded HMDB CSV has version ", fmt_version(got),
                                            " instead of ", fmt_version(r$version), call. = FALSE)
+      if (!isTRUE(hmdb_identical(tmp, r))) stop("downloaded HMDB CSV does not match the GitHub hash (try again in a few minutes)", call. = FALSE)
       if (!file.copy(tmp, r$local, overwrite = TRUE)) stop("could not write ", r$local, call. = FALSE)
       return(norm_path(r$local))
     }
