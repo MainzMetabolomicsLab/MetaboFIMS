@@ -1,5 +1,4 @@
-#V1.1
-
+# MetaboFIMS version: 1.2.0
 {
   library(MSnbase)
   library(Rdisop)  
