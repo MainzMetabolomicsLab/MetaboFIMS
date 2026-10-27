@@ -778,6 +778,7 @@ if (Ionization_method == "Positive") {
     adduct_masses <- list(H = proton_mass, Na = na_mass, K = k_mass)
     
     neutral_masses <- rep(NA, length(mz_values))
+    adducts <- rep(NA_character_, length(mz_values))
     used <- rep(FALSE, length(mz_values))
     
     for (i in seq_along(mz_values)) {
@@ -791,12 +792,14 @@ if (Ionization_method == "Positive") {
       k_idx  <- which(abs(mz_values - (candidate_neutral + k_mass)) <= tol & !used)
       
       neutral_masses[i] <- candidate_neutral
+      adducts[i] <- "M+H"
       used[i] <- TRUE
       
-      if (length(na_idx) > 0) { neutral_masses[na_idx[1]] <- candidate_neutral; used[na_idx[1]] <- TRUE }
-      if (length(k_idx)  > 0) { neutral_masses[k_idx[1]]  <- candidate_neutral; used[k_idx[1]]  <- TRUE }
+      if (length(na_idx) > 0) { neutral_masses[na_idx[1]] <- candidate_neutral; adducts[na_idx[1]] <- "M+Na"; used[na_idx[1]] <- TRUE }
+      if (length(k_idx)  > 0) { neutral_masses[k_idx[1]]  <- candidate_neutral; adducts[k_idx[1]]  <- "M+K";  used[k_idx[1]]  <- TRUE }
     }
     
+    attr(neutral_masses, "adduct") <- adducts
     return(neutral_masses)
   }
   
@@ -812,6 +815,7 @@ if (Ionization_method == "Positive") {
   detect_neutral_masses <- function(mz_values, ppm = 10) {
     
     neutral_masses <- rep(NA, length(mz_values))
+    adducts <- rep(NA_character_, length(mz_values))
     used <- rep(FALSE, length(mz_values))
     
     for (i in seq_along(mz_values)) {
@@ -828,18 +832,22 @@ if (Ionization_method == "Positive") {
       fa_idx <- which(abs(mz_values - expected_fa) <= tol & !used)
       
       neutral_masses[i] <- candidate_neutral
+      adducts[i] <- "M-H"
       used[i] <- TRUE
       
       if (length(cl_idx) > 0) {
         neutral_masses[cl_idx[1]] <- candidate_neutral
+        adducts[cl_idx[1]] <- "M+Cl"
         used[cl_idx[1]] <- TRUE
       }
       if (length(fa_idx) > 0) {
         neutral_masses[fa_idx[1]] <- candidate_neutral
+        adducts[fa_idx[1]] <- "M+HCOO"
         used[fa_idx[1]] <- TRUE
       }
     }
     
+    attr(neutral_masses, "adduct") <- adducts
     return(neutral_masses)
   }
 }
@@ -847,9 +855,12 @@ if (Ionization_method == "Positive") {
 
 {
   mz_values <- as.numeric(colnames(feature_matrix_df))
-  intensities <- as.numeric(feature_matrix_df[1, ])
+  intensities <- as.numeric(colMeans(feature_matrix_df, na.rm = TRUE))  # mean over all samples (was: sample 1 only)
   
   neutral_mass_values <- detect_neutral_masses(mz_values, ppm = ppm)
+  # Adduct labels from this (single) calculation, kept per feature for the final output matrix
+  initial_adducts <- setNames(attr(neutral_mass_values, "adduct"), colnames(feature_matrix_df))
+  attr(neutral_mass_values, "adduct") <- NULL
   
   result <- detect_isotopic_groups_with_numbers(neutral_mass_values, intensities)
   
@@ -1085,16 +1096,8 @@ if (Ionization_method == "Positive") {
   }
   
   neutral_mass_values <- as.numeric(feature_matrix_df_isotope[1, ])
-  intensity_values <- colMeans(
-    apply(feature_matrix_df_isotope[4:nrow(feature_matrix_df_isotope), , drop = FALSE],
-          2, as.numeric),
-    na.rm = TRUE
-  )
-  
-  peak_groups <- detect_isotopic_groups_with_numbers(
-    neutral_masses = neutral_mass_values,
-    intensities = intensity_values
-  )$group_numbers
+  # Use the isotope groups calculated once above (feature_matrix_df_isotope), no second calculation
+  peak_groups <- as.integer(unlist(feature_matrix_df_isotope["Peak Group Numbers", ], use.names = FALSE))
   
   unique_groups <- unique(na.omit(peak_groups))
   
@@ -1739,64 +1742,8 @@ feature_matrix_df_final_annotated["mz_matched_ADDUCT", ] <- mz_adduct_types
 # =============================
 
 
-if (Ionization_method == "Positive") {
-  
-  predicted_adducts <- rep(NA, length(mz_features))
-  used <- rep(FALSE, length(mz_features))
-  
-  for (i in seq_along(mz_features)) {
-    if (used[i]) next
-    
-    candidate_neutral      <- mz_features[i] - proton_mass
-    predicted_adducts[i]   <- "M+H"
-    used[i]                <- TRUE
-    
-    tol <- mz_features[i] * ppm / 1e6
-    
-    expected_na <- candidate_neutral + na_mass
-    na_idx <- which(abs(mz_features - expected_na) <= tol & !used)
-    if (length(na_idx) > 0) {
-      predicted_adducts[na_idx[1]] <- "M+Na"
-      used[na_idx[1]]              <- TRUE
-    }
-    
-    expected_k <- candidate_neutral + k_mass
-    k_idx <- which(abs(mz_features - expected_k) <= tol & !used)
-    if (length(k_idx) > 0) {
-      predicted_adducts[k_idx[1]] <- "M+K"
-      used[k_idx[1]]              <- TRUE
-    }
-  }
-  
-} else if (Ionization_method == "Negative") {
-  
-  predicted_adducts <- rep(NA, length(mz_features))
-  used <- rep(FALSE, length(mz_features))
-  
-  for (i in seq_along(mz_features)) {
-    if (used[i]) next
-    
-    candidate_neutral    <- mz_features[i] + proton_mass
-    predicted_adducts[i] <- "M-H"
-    used[i]              <- TRUE
-    
-    tol <- mz_features[i] * ppm / 1e6
-    
-    expected_cl <- candidate_neutral + cl_mass
-    cl_idx <- which(abs(mz_features - expected_cl) <= tol & !used)
-    if (length(cl_idx) > 0) {
-      predicted_adducts[cl_idx[1]] <- "M+Cl"
-      used[cl_idx[1]]              <- TRUE
-    }
-    
-    expected_fa <- candidate_neutral + fa_mass
-    fa_idx <- which(abs(mz_features - expected_fa) <= tol & !used)
-    if (length(fa_idx) > 0) {
-      predicted_adducts[fa_idx[1]] <- "M+HCOO"
-      used[fa_idx[1]]              <- TRUE
-    }
-  }
-}
+# Re-use the adduct labels from the first calculation (detect_neutral_masses), looked up by feature
+predicted_adducts <- unname(initial_adducts[colnames(feature_matrix_df_final_annotated)])
 
 adduct_labels_row <- as.data.frame(t(predicted_adducts), stringsAsFactors = FALSE)
 colnames(adduct_labels_row) <- colnames(feature_matrix_df_final_annotated)
