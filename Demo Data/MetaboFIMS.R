@@ -1,4 +1,4 @@
-# MetaboFIMS version: 1.2.0
+# MetaboFIMS version: 1.2.1
 {
   library(MSnbase)
   library(Rdisop)  
@@ -96,7 +96,9 @@
   update_run_parameters(list(
     run_status      = "started",
     run_started     = format(run_started_time, "%Y-%m-%d %H:%M:%S %z"),
-    pipeline_script = list(path = script_path_used, md5 = md5_of(script_path_used)),
+    pipeline_script = list(path = script_path_used, md5 = md5_of(script_path_used),
+                           version = get_var("pipeline_version", "unknown (not started from the app)")),
+    shiny_app       = list(version = get_var("app_version", "not started from the app")),
     folders         = list(data_dir           = get_var("data_dir"),
                            data_dir_raw_files = get_var("data_dir_raw_files"),
                            output_dir         = output_dir,
