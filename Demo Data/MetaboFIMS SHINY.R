@@ -94,6 +94,21 @@ if (!dir.exists("logs")) dir.create("logs", recursive = TRUE)
 APP_DIR    <- normalizePath(getwd(), winslash = "/", mustWork = TRUE)
 PATHS_FILE <- file.path(APP_DIR, "paths.yml")
 
+# App settings that persist across starts (kept separate from paths.yml)
+SETTINGS_FILE <- file.path(APP_DIR, "app_settings.yml")
+read_app_settings <- function() {
+  if (!file.exists(SETTINGS_FILE)) return(list())
+  st <- tryCatch(yaml::read_yaml(SETTINGS_FILE), error = function(e) NULL)
+  if (is.list(st)) st else list()
+}
+# Automatic update check at app start: on unless switched off (missing file = on)
+read_auto_update <- function() !isFALSE(read_app_settings()$auto_update_check)
+save_auto_update <- function(on) {
+  st <- read_app_settings()
+  st$auto_update_check <- isTRUE(on)
+  yaml::write_yaml(st, SETTINGS_FILE)
+}
+
 GH_OWNER   <- "MainzMetabolomicsLab"
 GH_REPO    <- "MetaboFIMS"
 GH_BRANCH  <- "main"
@@ -426,6 +441,7 @@ ui <- fluidPage(
       ),
       br(),
       actionButton("check_updates", "Check for updates"),
+      checkboxInput("auto_update", "Check for updates automatically at app start", value = read_auto_update()),
       uiOutput("version_status"),
       br(),
       fluidRow(
@@ -718,6 +734,7 @@ server <- function(input, output, session) {
   # ======================= Update check (pipeline script vs. GitHub) =======================
   update_info  <- reactiveVal(NULL)
   online_state <- reactiveVal(list())   # per component: list(version, status) of the last check
+  dialog_auto  <- reactiveVal(FALSE)    # TRUE while the dialog of the automatic start check is open
   
   output$version_status <- renderUI({
     st <- online_state()
@@ -753,6 +770,7 @@ server <- function(input, output, session) {
       return(invisible(NULL))
     }
     update_info(todo)
+    dialog_auto(!manual)
     
     choice_names <- lapply(todo, function(r) {
       tagList(strong(COMPONENT_LABELS[[r$kind]]), ": ", tags$code(fmt_version(r$local_version)), " \u2192 ",
@@ -768,6 +786,11 @@ server <- function(input, output, session) {
                          choiceValues = names(todo),
                          selected     = names(todo)[vapply(todo, function(r) r$state == "update available", TRUE)]),
       if ("app" %in% names(todo)) helpText("A Shiny app update takes effect after restarting the app."),
+      if (!manual) tagList(
+        hr(),
+        checkboxInput("disable_auto", "Don't check for updates automatically at start anymore", value = FALSE),
+        helpText("You can still check with 'Check for updates' and switch the automatic check on again there.")
+      ),
       footer = tagList(
         actionButton("update_keep", "Keep my versions"),
         actionButton("update_go", "Update selected", class = "btn-primary")
@@ -776,12 +799,31 @@ server <- function(input, output, session) {
     ), session = session)
   }
   
-  # Automatic check at start (not while the setup wizard is needed)
-  if (!NEEDS_SETUP) session$onFlushed(function() check_for_updates(manual = FALSE), once = TRUE)
+  # Automatic check at start (not while the setup wizard is needed, and only if not switched off)
+  if (!NEEDS_SETUP && read_auto_update()) {
+    session$onFlushed(function() check_for_updates(manual = FALSE), once = TRUE)
+  } else if (!NEEDS_SETUP) {
+    append_log("Automatic update check at start is switched off - use 'Check for updates'.")
+  }
+  
+  observeEvent(input$auto_update, {
+    save_auto_update(input$auto_update)
+    append_log(paste0("Automatic update check at start ", if (isTRUE(input$auto_update)) "switched on." else "switched off."))
+    showNotification(if (isTRUE(input$auto_update)) "Automatic update check at start: on" else
+      "Automatic update check at start: off - use 'Check for updates' to check manually.", type = "message")
+  }, ignoreInit = TRUE)
   observeEvent(input$check_updates, { check_for_updates(manual = TRUE) })
+  
+  # Opt-out ticked in the automatic dialog -> switch the setting off (the checkbox observer saves it)
+  apply_disable_auto <- function() {
+    if (isTRUE(dialog_auto()) && isTRUE(input$disable_auto))
+      updateCheckboxInput(session, "auto_update", value = FALSE)
+    dialog_auto(FALSE)
+  }
   
   observeEvent(input$update_keep, {
     removeModal()
+    apply_disable_auto()
     append_log("Update declined - continuing with the local versions.")
   })
   
@@ -800,6 +842,7 @@ server <- function(input, output, session) {
     sel  <- input$update_items
     info <- update_info()
     removeModal()
+    apply_disable_auto()
     req(info)
     if (!length(sel)) { append_log("Update: nothing selected."); return() }
     if (rv$running) {
