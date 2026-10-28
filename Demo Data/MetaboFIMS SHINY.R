@@ -1,10 +1,14 @@
-# MetaboFIMS SHINY version: 1.2.1
-# MetaboFIMS SHINY application with first-start setup wizard.
+# MetaboFIMS SHINY version: 1.2.2
+# MetaboFIMS SHINY application with setup wizard and update check.
 # Start this app from the folder that should contain your data (the "working folder").
-# On first start (or whenever paths.yml is missing / invalid / from another OS) a wizard asks to either
-#   (a) set the four paths manually with the built-in file browser, or
-#   (b) download the Demo Data from GitHub into the working folder and point the app to it.
-# The result is stored in paths.yml next to the app, so the wizard only appears again when needed.
+# On first start (or whenever paths.yml is missing / invalid / from another OS) a setup dialog shows what
+# already exists in the working folder and offers to
+#   (a) set the four paths manually with the built-in file browser,
+#   (b) download only the missing Demo Data files from GitHub (only offered if something already exists), or
+#   (c) download all Demo Data from GitHub (replaces existing demo files of the same name).
+# The result is stored in paths.yml next to the app, so the dialog only appears again when needed.
+# "Check for updates" compares the pipeline script, this app and the HMDB CSV with GitHub (hash + version).
+# Optional: a GitHub token in GITHUB_PAT (e.g. in ~/.Renviron) raises the GitHub API limit from 60 to 5000/hour.
 
 # ---- Repos & parallel install ----
 options(repos = c(CRAN = "https://cloud.r-project.org"))
@@ -87,7 +91,7 @@ OS_TYPE <- get_os()
 if (!dir.exists("logs")) dir.create("logs", recursive = TRUE)
 
 # ======================================================================
-# First-start setup: paths.yml, auto-detection, GitHub demo-data download
+# Setup: paths.yml, auto-detection, GitHub demo-data download
 # ======================================================================
 
 # Folder the app was started from. Demo data and hmdb.csv are placed here.
@@ -153,13 +157,13 @@ find_pipeline_script <- function() {
   exact <- file.path(APP_DIR, PIPELINE_SCRIPT_NAME)
   if (file.exists(exact)) return(exact)
   f <- list.files(APP_DIR, pattern = "^MetaboFIMS.*\\.[Rr]$", full.names = TRUE)
-  f <- f[!grepl("shiny|app", basename(f), ignore.case = TRUE)]
+  f <- f[!is_app_file(basename(f))]
   if (length(f)) sort(f, decreasing = TRUE)[1] else ""
 }
 
-# The Shiny app itself ("MetaboFIMS SHINY.R"); any MetaboFIMS*.R with "shiny"/"app" in its name counts as app file.
+# The Shiny app itself ("MetaboFIMS SHINY.R"); any MetaboFIMS*.R with "shiny" in its name counts as app file.
 APP_SCRIPT_NAME <- "MetaboFIMS SHINY.R"
-is_app_file <- function(name) grepl("^MetaboFIMS.*\\.[Rr]$", name) & grepl("shiny|app", name, ignore.case = TRUE)
+is_app_file <- function(name) grepl("^MetaboFIMS.*\\.[Rr]$", name) & grepl("shiny", name, ignore.case = TRUE)
 find_local_app <- function() {
   exact <- file.path(APP_DIR, APP_SCRIPT_NAME)
   if (file.exists(exact)) return(exact)
@@ -175,6 +179,43 @@ find_hmdb_csv <- function() {
   f <- list.files(APP_DIR, pattern = HMDB_FILE_RX, full.names = TRUE, ignore.case = TRUE)
   if (length(f)) f[1] else ""
 }
+
+# ---- GitHub API access ----
+# Without login GitHub allows 60 API requests per hour and IP address. A personal access token in the
+# environment variable GITHUB_PAT (or GITHUB_TOKEN), e.g. a line GITHUB_PAT=ghp_... in ~/.Renviron,
+# raises this to 5000/hour. The token is only sent to api.github.com.
+gh_token <- function() { t <- Sys.getenv("GITHUB_PAT"); if (!nzchar(t)) t <- Sys.getenv("GITHUB_TOKEN"); t }
+gh_headers <- function(accept = NULL) {
+  h <- character(0)
+  if (nzchar(gh_token())) h["Authorization"] <- paste("Bearer", gh_token())
+  if (!is.null(accept)) h["Accept"] <- accept
+  if (length(h)) h else NULL
+}
+# Readable reason when an API request fails (the rate_limit endpoint itself does not count against the limit)
+gh_failure_reason <- function(e) {
+  rl <- tryCatch({
+    con <- url("https://api.github.com/rate_limit", open = "rb", headers = gh_headers()); on.exit(close(con), add = TRUE)
+    jsonlite::fromJSON(paste(readLines(con, warn = FALSE), collapse = "\n"))$resources$core
+  }, error = function(e2) NULL)
+  if (!is.null(rl) && isTRUE(rl$remaining == 0)) {
+    return(paste0("GitHub API limit reached (", rl$limit, " requests per hour) - available again at ",
+                  format(as.POSIXct(rl$reset, origin = "1970-01-01"), "%H:%M"),
+                  if (!nzchar(gh_token())) ". Tip: a GitHub token in GITHUB_PAT raises the limit to 5000/hour." else "."))
+  }
+  if (is.null(rl)) return(paste0("GitHub not reachable (offline?): ", conditionMessage(e)))
+  conditionMessage(e)
+}
+# GET a JSON document from the GitHub API (with token if available, readable error on failure)
+gh_get_json <- function(u) {
+  tryCatch({
+    con <- url(u, open = "rb", headers = gh_headers()); on.exit(close(con), add = TRUE)
+    jsonlite::fromJSON(paste(readLines(con, warn = FALSE, encoding = "UTF-8"), collapse = "\n"))
+  }, error = function(e) stop(gh_failure_reason(e), call. = FALSE))
+}
+# Small cache for this R session: the repo file list (reused for a few minutes) and file contents by
+# SHA (a SHA always belongs to exactly one content, so these never go stale).
+GH_CACHE <- new.env()
+GH_TREE_MAX_AGE <- 600   # seconds
 
 # Does `rel` exist below `dest`? Case-insensitive, so "HMDB.CSV" counts as "HMDB.csv" also on Linux.
 exists_ci <- function(dest, rel) {
@@ -195,12 +236,8 @@ exists_ci <- function(dest, rel) {
 download_demo_data <- function(dest, progress = function(i, n, f) NULL, mode = c("missing", "overwrite")) {
   mode <- match.arg(mode)
   old <- options(timeout = max(3600, getOption("timeout"))); on.exit(options(old), add = TRUE)
-  api <- sprintf("https://api.github.com/repos/%s/%s/git/trees/%s?recursive=1", GH_OWNER, GH_REPO, GH_BRANCH)
-  res <- tryCatch(jsonlite::fromJSON(api),
-                  error = function(e) stop("Could not read the GitHub file list (offline, or API rate limit reached?): ",
-                                           conditionMessage(e), call. = FALSE))
-  if (isTRUE(res$truncated)) warning("GitHub returned a truncated file list - some demo files may be missing.", call. = FALSE)
-  tree <- res$tree
+  tree <- tryCatch(gh_tree(), error = function(e) stop("Could not read the GitHub file list: ", conditionMessage(e), call. = FALSE))
+  if (isTRUE(attr(tree, "truncated"))) warning("GitHub returned a truncated file list - some demo files may be missing.", call. = FALSE)
   prefix <- paste0(GH_DEMO, "/")
   blobs  <- tree[tree$type == "blob" & startsWith(tree$path, prefix), , drop = FALSE]
   # The Shiny app is not part of the demo download (it is updated via "Check for updates" instead)
@@ -229,6 +266,11 @@ download_demo_data <- function(dest, progress = function(i, n, f) NULL, mode = c
       utils::download.file(raw_url(blobs$path[i]), tmp, mode = "wb", quiet = TRUE)
       if (is_lfs_pointer(tmp)) {   # repo stores this file with Git LFS
         utils::download.file(media_url(blobs$path[i]), tmp, mode = "wb", quiet = TRUE)
+      } else if (!identical(git_blob_sha(readBin(tmp, "raw", file.size(tmp))), blobs$sha[i])) {
+        # raw.githubusercontent.com served an older cached copy (happens right after an upload)
+        # -> take exactly this version from the API instead
+        fresh <- tryCatch(gh_blob_bytes(blobs$sha[i]), error = function(e) NULL)
+        if (!is.null(fresh)) writeBin(fresh, tmp)
       }
       TRUE
     }, error = function(e) { unlink(tmp); stop("Download of '", rel[i], "' failed: ", conditionMessage(e), call. = FALSE) })
@@ -334,19 +376,30 @@ local_version <- function(kind, path) {
   if (kind == "hmdb") read_hmdb_version(path) else read_script_version(path, VERSION_RX[[kind]])
 }
 
-# File list of the GitHub repo (one API call, shared by all components of one check)
-gh_tree <- function() {
+# File list of the GitHub repo. Reused for GH_TREE_MAX_AGE seconds; refresh = TRUE always fetches it anew
+# (used by the "Check for updates" button, so a file uploaded a minute ago is seen).
+gh_tree <- function(refresh = FALSE) {
+  if (!refresh && !is.null(GH_CACHE$tree) &&
+      difftime(Sys.time(), GH_CACHE$tree_time, units = "secs") < GH_TREE_MAX_AGE) return(GH_CACHE$tree)
   api <- sprintf("https://api.github.com/repos/%s/%s/git/trees/%s?recursive=1", GH_OWNER, GH_REPO, GH_BRANCH)
-  jsonlite::fromJSON(api)$tree
+  res <- gh_get_json(api)
+  tree <- res$tree
+  attr(tree, "truncated") <- isTRUE(res$truncated)
+  GH_CACHE$tree <- tree; GH_CACHE$tree_time <- Sys.time()
+  tree
 }
 
 # Exact content of a file version on GitHub, fetched by its git blob SHA through the API.
 # Unlike raw.githubusercontent.com this is never served from a stale cache right after an upload.
 gh_blob_bytes <- function(sha) {
+  key <- paste0("blob_", sha)
+  if (!is.null(GH_CACHE[[key]])) return(GH_CACHE[[key]])
   api <- sprintf("https://api.github.com/repos/%s/%s/git/blobs/%s", GH_OWNER, GH_REPO, sha)
-  b <- jsonlite::fromJSON(api)
+  b <- gh_get_json(api)
   if (!identical(b$encoding, "base64")) stop("unexpected blob encoding from GitHub", call. = FALSE)
-  jsonlite::base64_dec(gsub("[\r\n]", "", b$content))
+  bytes <- jsonlite::base64_dec(gsub("[\r\n]", "", b$content))
+  if (length(bytes) < 5e6) GH_CACHE[[key]] <- bytes   # cache only small files (scripts)
+  bytes
 }
 # Writes the GitHub file with this SHA to `dest`: via the blob API, falling back to the raw URL.
 # Returns TRUE only if the written file really has that SHA.
@@ -391,6 +444,8 @@ find_online_hmdb <- function(tree) {
   api   <- sprintf("https://api.github.com/repos/%s/%s/contents/%s?ref=%s", GH_OWNER, GH_REPO, enc, GH_BRANCH)
   raw   <- sprintf("https://raw.githubusercontent.com/%s/%s/%s/%s", GH_OWNER, GH_REPO, GH_BRANCH, enc)
   media <- sprintf("https://media.githubusercontent.com/media/%s/%s/%s/%s", GH_OWNER, GH_REPO, GH_BRANCH, enc)
+  key <- paste0("hmdb_", b$sha)   # same SHA = same file -> header line and LFS info can be reused
+  if (!is.null(GH_CACHE[[key]])) return(GH_CACHE[[key]])
   first_line <- function(u, headers = NULL) {
     con <- if (is.null(headers)) url(u, open = "rb") else url(u, open = "rb", headers = headers)
     on.exit(close(con), add = TRUE)
@@ -403,23 +458,25 @@ find_online_hmdb <- function(tree) {
     if (!is.na(l)) diag <<- c(diag, paste0(label, ": '", substr(l, 1, 120), if (nchar(l) > 120) "...'" else "'"))
     l
   }
-  l <- try_src("API", api, c(Accept = "application/vnd.github.raw"))
+  l <- try_src("API", api, gh_headers("application/vnd.github.raw"))
   if (is.na(l)) l <- try_src("raw", raw)
   src <- raw
   lfs_oid <- NA_character_
   if (!is.na(l) && startsWith(l, "version https://git-lfs")) {   # LFS pointer -> real file
     # the pointer holds the SHA-256 of the real file ("oid sha256:..."), used for the hash comparison
     ptr <- tryCatch({
-      con <- url(api, open = "rb", headers = c(Accept = "application/vnd.github.raw")); on.exit(close(con), add = TRUE)
+      con <- url(api, open = "rb", headers = gh_headers("application/vnd.github.raw")); on.exit(close(con), add = TRUE)
       readLines(con, n = 5, warn = FALSE)
     }, error = function(e) character(0))
     oid <- sub("^oid sha256:", "", grep("^oid sha256:", ptr, value = TRUE))
     if (length(oid)) lfs_oid <- tolower(oid[1])
     l <- try_src("LFS", media); src <- media
   }
-  list(path = b$path, name = basename(b$path), sha = b$sha, url = src, api_url = api, lfs_oid = lfs_oid,
-       version = version_from_header_line(if (is.na(l)) "" else l),
-       diag = paste(diag, collapse = " | "))
+  out <- list(path = b$path, name = basename(b$path), sha = b$sha, url = src, api_url = api, lfs_oid = lfs_oid,
+              version = version_from_header_line(if (is.na(l)) "" else l),
+              diag = paste(diag, collapse = " | "))
+  if (!is.na(out$version)) GH_CACHE[[key]] <- out   # cache only successful reads
+  out
 }
 
 # Is the local HMDB CSV identical to the one on GitHub? Normal files: git blob SHA-1 (as is, or with
@@ -506,8 +563,31 @@ NEEDS_SETUP <- !all(paths_status(initial_paths))
 
 # ---- What already exists in the working folder (used by the setup dialog) ----
 # Local check only (no network): pipeline script, HMDB CSV and folders that contain mzML/mzXML files.
+# Searches at most 3 folder levels deep (fast also when started from a big folder) and skips the folders
+# the pipeline writes exported spectra to, so those are not counted as raw files.
+RAW_SCAN_DEPTH <- 3
+RAW_SCAN_SKIP  <- c("accumulated_mzml", "accumulated_smoothed_mzml", "centroided_mzml", "logs", ".git")
+find_raw_files <- function(root, depth = RAW_SCAN_DEPTH) {
+  out <- character(0); dirs <- ""
+  for (lvl in 0:depth) {
+    nxt <- character(0)
+    for (d in dirs) {
+      full <- if (nzchar(d)) file.path(root, d) else root
+      f <- list.files(full, pattern = "\\.(mzml|mzxml)$", ignore.case = TRUE)
+      if (length(f)) out <- c(out, if (nzchar(d)) file.path(d, f) else f)
+      if (lvl < depth) {
+        sub <- basename(list.dirs(full, recursive = FALSE, full.names = TRUE))
+        sub <- sub[!tolower(sub) %in% RAW_SCAN_SKIP]
+        nxt <- c(nxt, if (nzchar(d)) file.path(d, sub) else sub)
+      }
+    }
+    dirs <- nxt
+    if (!length(dirs)) break
+  }
+  out
+}
 detect_local_setup <- function() {
-  ms  <- list.files(APP_DIR, pattern = "\\.(mzml|mzxml)$", recursive = TRUE, ignore.case = TRUE)
+  ms  <- find_raw_files(APP_DIR)
   raw <- unique(dirname(ms))
   list(script = find_pipeline_script(), hmdb = find_hmdb_csv(),
        raw_dirs = raw[raw != "."], raw_here = any(raw == "."), n_raw = length(ms))
@@ -552,7 +632,8 @@ setup_modal <- function(msg = NULL) {
   
   choices <- c("Set the paths manually (built-in file browser)" = "manual",
                if (something_found) c("Download only what is missing from the Demo Data (keep existing files)" = "download_missing"),
-               "Download all Demo Data (overwrite existing files)" = "download_all")
+               if (something_found) c("Download all Demo Data again (replaces existing demo files)" = "download_all")
+               else c("Download the Demo Data from GitHub" = "download_all"))
   
   # What "download only missing" would fetch (one GitHub API call; skipped if nothing was found locally)
   missing_info <- if (something_found) {
@@ -567,7 +648,7 @@ setup_modal <- function(msg = NULL) {
   }
   
   modalDialog(
-    title = "First-start setup",
+    title = "Setup",
     p("Detected operating system: ", strong(switch(OS_TYPE, windows = "Windows", macos = "macOS",
                                                    linux = "Linux", "unknown"))),
     p("Working folder (the app was started from here): ", tags$code(APP_DIR)),
@@ -578,7 +659,7 @@ setup_modal <- function(msg = NULL) {
     ) else
       p("Nothing found in the working folder yet (no pipeline script, HMDB CSV or raw files)."),
     radioButtons(
-      "setup_mode", "How do you want to set them up?",
+      "setup_mode", "How do you want to proceed?",
       choices = choices,
       selected = "manual"
     ),
@@ -592,8 +673,7 @@ setup_modal <- function(msg = NULL) {
                                                  "folder - including your own changes to MetaboFIMS.R, the HMDB CSV or the demo raw files. ",
                                                  "Other files and folders (your own data, previous outputs, the app, paths.yml) are not touched.")
                      else helpText("All files of 'Demo Data' are downloaded into the working folder.")),
-    helpText("Download: the HMDB CSV is placed directly in the working folder and the folders are filled in automatically. ",
-             "The pipeline R script is searched next to the app; if it is not found you will be asked to select it."),
+    helpText("Download: the HMDB CSV is placed directly in the working folder and the paths are filled in automatically."),
     footer = tagList(
       actionButton("setup_skip", "Later"),
       actionButton("setup_go", "Continue", class = "btn-primary")
@@ -626,8 +706,12 @@ read_hmdb_levels <- function(csv_path) {
        origin      = distinct_values(dt$Origin))
 }
 
+# Version of the running app, read once at start from its own header (shown in the title)
+APP_VERSION <- read_script_version(find_local_app(), VERSION_RX$app)
+APP_TITLE   <- paste0("MetaboFIMS", if (!is.na(APP_VERSION)) paste0(" ", APP_VERSION) else "")
+
 ui <- fluidPage(
-  titlePanel("FIMS Data processing of positive or negative ion mode data"),
+  titlePanel(paste0(APP_TITLE, " – FI-MS data processing and annotation"), windowTitle = APP_TITLE),
   sidebarLayout(
     sidebarPanel(
       width = 4,
@@ -703,11 +787,11 @@ ui <- fluidPage(
       h4("Run Controls & Config"),
       fluidRow(
         column(6, actionButton("run_btn", "Run pipeline", class = "btn-primary")),
-        column(6, actionButton("stop_btn", "Stop (graceful)", class = "btn-danger"))
+        column(6, actionButton("stop_btn", "Stop pipeline", class = "btn-danger"))
       ),
       br(),
       fluidRow(
-        column(8, textInput("profile_name", "Profile name - Save to working directory (getwd())", value = "")),
+        column(8, textInput("profile_name", "Config name (saved in the working folder)", value = "")),
         column(4, actionButton("save_config", "Save config"))
       ),
       fileInput("load_config_file", "Load config (.yml)", accept = c(".yml", ".yaml")),
@@ -816,7 +900,7 @@ server <- function(input, output, session) {
   
   output$console_out <- renderText({ paste(tail(rv$log, 200), collapse = "\n") })
   
-  # ======================= First-start setup =======================
+  # ======================= Setup dialog =======================
   setup_pending <- reactiveVal(NEEDS_SETUP)
   
   current_paths <- reactive(list(
@@ -896,7 +980,7 @@ server <- function(input, output, session) {
     if (length(kept)) {
       append_log(paste0("Setup: ", length(kept), " existing file(s) kept unchanged: ", paste(kept, collapse = ", ")))
       # existing files may be older versions -> compare pipeline / HMDB with GitHub and offer updates
-      check_for_updates(manual = TRUE, script = script, hmdb = res$file_path)
+      check_for_updates(manual = TRUE, script = script, hmdb = res$file_path, refresh = FALSE)
     }
     
     p <- list(script_path = script, data_dir = res$data_dir,
@@ -962,15 +1046,15 @@ server <- function(input, output, session) {
   })
   
   # script / hmdb: paths to check (default: the current inputs; the setup passes the just-downloaded paths)
-  check_for_updates <- function(manual = FALSE, script = NULL, hmdb = NULL) {
+  check_for_updates <- function(manual = FALSE, script = NULL, hmdb = NULL, refresh = manual) {
     script <- script %||% isolate(.s(input$script_path))
     hmdb   <- hmdb %||% isolate(.s(input$file_path))
-    tree <- tryCatch(gh_tree(), error = function(e) e)
+    tree <- tryCatch(gh_tree(refresh = refresh), error = function(e) e)
     if (inherits(tree, "error")) {
       online_state(list(pipeline = list(version = NA_character_, status = "check failed"),
                         app      = list(version = NA_character_, status = "check failed"),
                         hmdb     = list(version = NA_character_, status = "check failed")))
-      append_log(paste("Update check skipped (offline or GitHub not reachable):", conditionMessage(tree)))
+      append_log(paste("Update check skipped:", conditionMessage(tree)))
       if (manual) showNotification(paste("Update check failed:", conditionMessage(tree)), type = "error", session = session)
       return(invisible(NULL))
     }
@@ -1055,7 +1139,7 @@ server <- function(input, output, session) {
       # normal file: contents API (current file, no stale cache); LFS file: media URL (the API only serves the pointer)
       lfs <- !is.na(.s(r$lfs_oid)) && nzchar(.s(r$lfs_oid))
       ok <- !lfs && !is.null(r$api_url) && isTRUE(tryCatch({
-        utils::download.file(r$api_url, tmp, mode = "wb", quiet = TRUE, headers = c(Accept = "application/vnd.github.raw"))
+        utils::download.file(r$api_url, tmp, mode = "wb", quiet = TRUE, headers = gh_headers("application/vnd.github.raw"))
         TRUE
       }, error = function(e) FALSE))
       if (!ok) utils::download.file(r$url, tmp, mode = "wb", quiet = TRUE)
