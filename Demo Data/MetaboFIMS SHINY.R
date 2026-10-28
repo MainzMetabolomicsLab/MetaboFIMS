@@ -1,4 +1,4 @@
-# MetaboFIMS SHINY version: 1.2.2
+# MetaboFIMS SHINY version: 1.2.3
 # MetaboFIMS SHINY application with setup wizard and update check.
 # Start this app from the folder that should contain your data (the "working folder").
 # On first start (or whenever paths.yml is missing / invalid / from another OS) a setup dialog shows what
@@ -150,26 +150,24 @@ save_saved_paths <- function(p) {
   yaml::write_yaml(out, PATHS_FILE)
 }
 
-# Pipeline script sitting next to the app: "MetaboFIMS.R" first; otherwise (older installs, e.g.
-# "MetaboFIMS V1.1.R") the highest MetaboFIMS*.R name wins. App files themselves are ignored.
+# Pipeline script sitting next to the app (locally and in "Demo Data" on GitHub).
 PIPELINE_SCRIPT_NAME <- "MetaboFIMS.R"
+# Only the exact name "MetaboFIMS.R" (any case) counts - other scripts such as MetaboFIMS_MSMLS_analysis.R are ignored.
+PIPELINE_FILE_RX <- "^MetaboFIMS\\.R$"
 find_pipeline_script <- function() {
-  exact <- file.path(APP_DIR, PIPELINE_SCRIPT_NAME)
-  if (file.exists(exact)) return(exact)
-  f <- list.files(APP_DIR, pattern = "^MetaboFIMS.*\\.[Rr]$", full.names = TRUE)
-  f <- f[!is_app_file(basename(f))]
-  if (length(f)) sort(f, decreasing = TRUE)[1] else ""
+  f <- list.files(APP_DIR, pattern = PIPELINE_FILE_RX, full.names = TRUE, ignore.case = TRUE)
+  if (length(f)) f[1] else ""
 }
 
-# The Shiny app itself ("MetaboFIMS SHINY.R"); any MetaboFIMS*.R with "shiny" in its name counts as app file.
+# The Shiny app itself: only the exact name "MetaboFIMS SHINY.R" (any case) is used for the update check,
+# locally and on GitHub. is_app_file() (any MetaboFIMS*.R with "shiny" in the name) is only used to keep
+# app copies out of the demo download.
 APP_SCRIPT_NAME <- "MetaboFIMS SHINY.R"
-is_app_file <- function(name) grepl("^MetaboFIMS.*\\.[Rr]$", name) & grepl("shiny", name, ignore.case = TRUE)
+APP_FILE_RX     <- "^MetaboFIMS SHINY\\.R$"
+is_app_file <- function(name) grepl("^MetaboFIMS.*\\.R$", name, ignore.case = TRUE) & grepl("shiny", name, ignore.case = TRUE)
 find_local_app <- function() {
-  exact <- file.path(APP_DIR, APP_SCRIPT_NAME)
-  if (file.exists(exact)) return(exact)
-  f <- list.files(APP_DIR, full.names = TRUE)
-  f <- f[is_app_file(basename(f))]
-  if (length(f)) sort(f, decreasing = TRUE)[1] else ""
+  f <- list.files(APP_DIR, pattern = APP_FILE_RX, full.names = TRUE, ignore.case = TRUE)
+  if (length(f)) f[1] else ""
 }
 
 # HMDB csv sitting directly in the working folder. Only "HMDB.csv" (any case) counts - other HMDB_*.csv
@@ -414,13 +412,12 @@ fetch_online_file <- function(sha, url, dest) {
 # without the exact name the highest matching name wins. Also reads the version from its header.
 find_online_script <- function(kind = "pipeline", tree = gh_tree()) {
   nm   <- basename(tree$path)
-  is_kind <- if (kind == "app") is_app_file(nm) else grepl("^MetaboFIMS.*\\.[Rr]$", nm) & !is_app_file(nm)
+  is_kind <- grepl(if (kind == "app") APP_FILE_RX else PIPELINE_FILE_RX, nm, ignore.case = TRUE)
   hit  <- tree$type == "blob" & startsWith(tree$path, paste0(GH_DEMO, "/")) & is_kind
   b    <- tree[hit, , drop = FALSE]
   if (!nrow(b)) stop("No MetaboFIMS ", if (kind == "app") "Shiny app" else "pipeline script",
                      " found in '", GH_DEMO, "' of the GitHub repository.", call. = FALSE)
-  exact <- basename(b$path) == (if (kind == "app") APP_SCRIPT_NAME else PIPELINE_SCRIPT_NAME)
-  b    <- if (any(exact)) b[which(exact)[1], , drop = FALSE] else b[order(basename(b$path), decreasing = TRUE)[1], , drop = FALSE]
+  b    <- b[order(nchar(b$path))[1], , drop = FALSE]   # prefer the file at the top of "Demo Data"
   enc  <- paste(vapply(strsplit(b$path, "/", fixed = TRUE)[[1]], utils::URLencode, "", reserved = TRUE), collapse = "/")
   url  <- sprintf("https://raw.githubusercontent.com/%s/%s/%s/%s", GH_OWNER, GH_REPO, GH_BRANCH, enc)
   # Online version: read from exactly the file version with this SHA
